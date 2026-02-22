@@ -1,0 +1,41 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Confidential / Secret files
+google-services.json
+firebase.ts
+.env
+.env.*
+! .env.example
+*.jks
+*.keystore
+
+# Android build outputs
+android/app/google-services.json
+build/
+android/app/build/
+android/.gradle/
+**/capacitor-cordova-android-plugins/
+.gradle/

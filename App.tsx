@@ -12,6 +12,9 @@ import { SystemAdminTool } from './components/SystemAdminTool';
 import { UserRole, UserProfile, ServiceRequest } from './types';
 import { useAuth } from './context/AuthContext';
 import { useLanguage } from './context/LanguageContext';
+import { NotificationService } from './utils/notificationService';
+import { analytics } from './firebase';
+import { logEvent } from 'firebase/analytics';
 
 const App: React.FC = () => {
   const { profile: user, loading, logout, setProfile } = useAuth();
@@ -23,6 +26,11 @@ const App: React.FC = () => {
   const [selectedRole, setSelectedRole] = useState<UserRole | null>(() => {
     return localStorage.getItem('bricola_selected_role') as UserRole | null;
   });
+
+  useEffect(() => {
+    // Analytics tracking for app start
+    analytics.then(a => a && logEvent(a, 'app_open'));
+  }, []);
 
   const handleOnboardingFinish = (updatedUser: UserProfile) => {
     handleUpdateProfile(updatedUser);
@@ -55,10 +63,16 @@ const App: React.FC = () => {
     setSelectedRole(role);
     localStorage.setItem('bricola_selected_role', role);
     setCurrentStep('AUTH');
+    analytics.then(a => a && logEvent(a, 'select_role', { role }));
   };
 
   const handleAuthSuccess = (profile: UserProfile) => {
     setProfile(profile);
+    
+    // Initialize real push notifications
+    NotificationService.init();
+    analytics.then(a => a && logEvent(a, 'login', { method: 'email', role: profile.role }));
+
     if (!profile.onboardingCompleted) {
        setCurrentStep('ONBOARDING');
     } else {

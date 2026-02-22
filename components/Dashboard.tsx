@@ -1,9 +1,11 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { UserProfile, UserRole, Language, translations, ServiceRequest, ChatMessage } from '../types';
-import { db, storage } from '../firebase';
+import { db, storage, remoteConfig, analytics } from '../firebase';
 import { collection, addDoc, query, where, onSnapshot, orderBy, doc, updateDoc, serverTimestamp, getDoc } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { fetchAndActivate, getBoolean, getNumber } from 'firebase/remote-config';
+import { logEvent } from 'firebase/analytics';
 import { Geolocation } from '@capacitor/geolocation';
 import { MapView } from './MapView';
 import { SideMenu } from './SideMenu';
@@ -59,6 +61,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   // Request form state
   const [showRequestForm, setShowRequestForm] = useState(false);
+  const [promoEnabled, setPromoEnabled] = useState(false);
   const [requestDetails, setRequestDetails] = useState({
     serviceType: '',
     description: '',
@@ -191,6 +194,17 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   // Real-time listener for current user's requests
   useEffect(() => {
+    // Sync Remote Config
+    const syncRemoteConfig = async () => {
+      try {
+        await fetchAndActivate(remoteConfig);
+        setPromoEnabled(getBoolean(remoteConfig, 'ramadan_promo_enabled'));
+      } catch (e) {
+        console.warn('Remote Config sync failed');
+      }
+    };
+    syncRemoteConfig();
+
     if (user.role === UserRole.CLIENT) {
       if (user.id === 'mock_guest') {
         const mockTechs: UserProfile[] = [
@@ -421,6 +435,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
     }
 
     setIsSubmitting(true);
+    analytics.then(a => a && logEvent(a, 'create_request_start', { service: requestDetails.serviceType }));
+
     try {
       if (user.id === 'mock_guest') {
         let mockCoords = { lat: 32.9297 + (Math.random() - 0.5) * 0.1, lng: 10.4518 + (Math.random() - 0.5) * 0.1 };
@@ -475,6 +491,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         clientRating: user.ratingAvg || 0.0
       };
       await addDoc(collection(db, 'requests'), newRequest);
+      analytics.then(a => a && logEvent(a, 'create_request_success', { service: requestDetails.serviceType }));
       alert(lang === 'AR' ? 'تم إرسال طلبك بنجاح!' : 'Request sent successfully!');
       setShowRequestForm(false);
       setRequestDetails({
@@ -916,6 +933,17 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
       {user.role === UserRole.CLIENT ? (
         <div className="space-y-6">
+          {/* Dynamic Remote Promo Banner */}
+          {promoEnabled && (
+            <div className="bg-gradient-to-r from-purple-900 to-indigo-900 p-6 rounded-[2.5rem] text-white shadow-xl flex items-center justify-between animate-pulse">
+               <div className="flex flex-col gap-1">
+                  <span className="text-[10px] font-black tracking-widest uppercase text-indigo-300">🌙 {lang === 'AR' ? 'عرض رمضان' : 'RAMADAN SPECIAL'}</span>
+                  <h4 className="text-xl font-black">{lang === 'AR' ? 'خصم 30% على الصيانة' : '30% Off on All Repairs!'}</h4>
+               </div>
+               <span className="text-4xl">🕌</span>
+            </div>
+          )}
+
           {/* Enhanced Promo/Hero Section */}
           <div className="relative overflow-hidden bg-slate-900 rounded-[2.5rem] p-6 text-white shadow-2xl group active:scale-95 transition-all">
              <div className="relative z-10 flex flex-col gap-4">

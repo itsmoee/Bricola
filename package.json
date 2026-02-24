@@ -11,16 +11,20 @@
     "mobile:open": "npx cap open android"
   },
   "dependencies": {
+    "@capacitor-firebase/crashlytics": "^8.1.0",
     "@capacitor/android": "^8.1.0",
     "@capacitor/app": "^8.0.1",
     "@capacitor/cli": "^8.1.0",
+    "@capacitor/clipboard": "^8.0.1",
     "@capacitor/core": "^8.1.0",
     "@capacitor/device": "^8.0.1",
     "@capacitor/geolocation": "^8.1.0",
     "@capacitor/local-notifications": "^8.0.1",
     "@capacitor/push-notifications": "^8.0.1",
+    "@capacitor/share": "^8.0.1",
     "@types/leaflet": "^1.9.21",
     "firebase": "^12.9.0",
+    "jspdf": "^4.2.0",
     "leaflet": "^1.9.4",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
@@ -29,6 +33,9 @@
   "devDependencies": {
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "autoprefixer": "^10.4.24",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.19",
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }

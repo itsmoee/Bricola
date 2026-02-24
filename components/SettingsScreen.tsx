@@ -1,6 +1,6 @@
 
 import React, { useState } from 'react';
-import { UserProfile, Language, translations, UserRole, ServiceCategory } from '../types';
+import { UserProfile, Language, translations, UserRole, ServiceCategory, AvailabilityStatus } from '../types';
 import { db, storage } from '../firebase';
 import { doc, updateDoc } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
@@ -36,6 +36,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   });
 
   const [skills, setSkills] = useState<string[]>(user.skills || []);
+  const [availabilityStatus, setAvailabilityStatus] = useState<AvailabilityStatus>(user.availabilityStatus || 'AVAILABLE');
 
   const toggleSkill = (skill: string) => {
     setSkills(prev => 
@@ -48,6 +49,7 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   const [notifications, setNotifications] = useState(user.notificationsEnabled ?? true);
   const [isSaving, setIsSaving] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [uploadStatus, setUploadStatus] = useState<Record<string, 'IDLE' | 'LOADING' | 'SUCCESS'>>({});
 
   const handleFileUpload = async (field: keyof UserProfile, file: File) => {
@@ -61,15 +63,14 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
       const storageRef = ref(storage, `tech_docs/${user.id}/${field}_${Date.now()}`);
       await uploadBytes(storageRef, file);
       const url = await getDownloadURL(storageRef);
-      
+
       const userRef = doc(db, 'users', user.id);
       await updateDoc(userRef, { [field]: url });
       onUpdateProfile({ ...user, [field]: url });
       setUploadStatus(prev => ({ ...prev, [field]: 'SUCCESS' }));
       setTimeout(() => setUploadStatus(prev => ({ ...prev, [field]: 'IDLE' })), 3000);
-    } catch (err) {
-      console.error(err);
-      alert('Upload failed');
+    } catch {
+      alert(lang === 'AR' ? 'فشل الرفع. يرجى المحاولة مجدداً.' : 'Upload failed. Please try again.');
       setUploadStatus(prev => ({ ...prev, [field]: 'IDLE' }));
     } finally {
       setIsUploading(false);
@@ -77,20 +78,20 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
   };
 
   const handleProfileGalleryUpload = async (file: File) => {
-     if (user.id === 'mock_guest') return;
-     setIsUploading(true);
-     try {
-       const storageRef = ref(storage, `gallery/${user.id}/${Date.now()}`);
-       await uploadBytes(storageRef, file);
-       const url = await getDownloadURL(storageRef);
-       const newGallery = [...(user.galleryUrls || []), url];
-       await updateDoc(doc(db, 'users', user.id), { galleryUrls: newGallery });
-       onUpdateProfile({ ...user, galleryUrls: newGallery });
-     } catch (err) {
-       console.error(err);
-     } finally {
-       setIsUploading(false);
-     }
+    if (user.id === 'mock_guest') return;
+    setIsUploading(true);
+    try {
+      const storageRef = ref(storage, `gallery/${user.id}/${Date.now()}`);
+      await uploadBytes(storageRef, file);
+      const url = await getDownloadURL(storageRef);
+      const newGallery = [...(user.galleryUrls || []), url];
+      await updateDoc(doc(db, 'users', user.id), { galleryUrls: newGallery });
+      onUpdateProfile({ ...user, galleryUrls: newGallery });
+    } catch {
+      alert(lang === 'AR' ? 'فشل رفع الصورة.' : 'Image upload failed.');
+    } finally {
+      setIsUploading(false);
+    }
   };
 
   const handleRemoveGalleryImage = async (index: number) => {
@@ -102,15 +103,17 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
 
   const handleSave = async () => {
     setIsSaving(true);
+    setSaveError(null);
     const complexLocation = selectedCity ? (selectedPlace ? `${selectedCity}, ${selectedPlace}` : selectedCity) : location;
-    
+
     const updatedUser: UserProfile = {
       ...user,
       fullName,
       phone,
       location: complexLocation,
       notificationsEnabled: notifications,
-      skills
+      skills,
+      availabilityStatus,
     };
 
     if (user.id !== 'mock_guest') {
@@ -121,16 +124,19 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
           phone,
           location: complexLocation,
           notificationsEnabled: notifications,
-          skills
+          skills,
+          availabilityStatus,
         });
-      } catch (err) {
-        console.error('Error updating profile in settings:', err);
+      } catch {
+        setSaveError(t.errorSaving);
+        setIsSaving(false);
+        return;
       }
     }
 
     onUpdateProfile(updatedUser);
     setIsSaving(false);
-    alert(lang === 'AR' ? 'تم الحفظ بنجاح' : 'Saved successfully');
+    alert(t.savedSuccess);
   };
 
   return (
@@ -241,6 +247,33 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
             
             {user.role === UserRole.TECHNICIAN && (
               <div className="space-y-6 pt-4 border-t border-gray-100">
+                {/* Availability State Toggle */}
+                <div className="space-y-4">
+                    <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest px-1">
+                      {t.availability}
+                    </label>
+                    <div className="grid grid-cols-3 gap-2">
+                        {(['AVAILABLE', 'BUSY', 'VACATION'] as AvailabilityStatus[]).map((status) => (
+                          <button
+                            key={status}
+                            type="button"
+                            onClick={() => setAvailabilityStatus(status)}
+                            className={`py-3 px-1 rounded-2xl text-[10px] font-black transition-all border-2 ${
+                                availabilityStatus === status
+                                ? status === 'AVAILABLE' ? 'bg-green-50 border-green-500 text-green-700' :
+                                    status === 'BUSY' ? 'bg-red-50 border-red-500 text-red-700' :
+                                    'bg-gray-100 border-gray-500 text-gray-700'
+                                : 'bg-white border-transparent text-gray-300 hover:bg-gray-50 shadow-sm'
+                            }`}
+                          >
+                            {status === 'AVAILABLE' ? t.availableToday :
+                             status === 'BUSY' ? t.busyThisWeek :
+                             t.onVacation}
+                          </button>
+                        ))}
+                    </div>
+                </div>
+
                 {/* Specialties Selection */}
                 <div className="space-y-4">
                   <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest">{lang === 'AR' ? 'تخصصاتك (يمكن اختيار أكثر من واحد)' : 'Your Specialties (Multiple Selection)'}</label>
@@ -355,7 +388,12 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({
               </div>
             )}
           </div>
-          <button 
+          {saveError && (
+            <div className="p-4 bg-red-50 text-red-600 rounded-2xl text-sm font-medium">
+              {saveError}
+            </div>
+          )}
+          <button
             onClick={handleSave}
             disabled={isSaving || isUploading}
             className="w-full py-4 bg-orange-500 text-white rounded-2xl font-black text-sm shadow-xl shadow-orange-100 hover:bg-orange-600 transition-all disabled:opacity-50 mt-2"

@@ -1,8 +1,10 @@
 
 import React, { useState } from 'react';
 import { UserProfile, Language, translations, ServiceRequest, UserRole } from '../types';
-import { db } from '../firebase';
-import { doc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { db, analytics } from '../firebase';
+import { doc, updateDoc, serverTimestamp, getDoc } from 'firebase/firestore';
+import { logEvent } from 'firebase/analytics';
+import { jsPDF } from 'jspdf';
 
 interface RequestControlPanelProps {
   request: ServiceRequest;
@@ -22,15 +24,28 @@ export const RequestControlPanel: React.FC<RequestControlPanelProps> = ({
   const [offerPrice, setOfferPrice] = useState(request.quote || '');
   const [offerMessage, setOfferMessage] = useState('');
   const [showOfferForm, setShowOfferForm] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  // Counter-offer form
+  const [showCounterForm, setShowCounterForm] = useState(false);
+  const [counterPrice, setCounterPrice] = useState('');
+  // Rating form
+  const [selectedRating, setSelectedRating] = useState(request.rating || 0);
+  const [ratingFeedback, setRatingFeedback] = useState(request.feedback || '');
+  const [ratingSubmitted, setRatingSubmitted] = useState(!!request.rating);
 
   const updateStatus = async (newStatus: string) => {
     setIsUpdating(true);
+    setActionError(null);
     let updatedData: any = { status: newStatus };
-    
+
     // Auto-assign tech if accepting
     if (newStatus === 'ACCEPTED' && !request.assignedTechId) {
        updatedData.assignedTechId = user.id;
        updatedData.assignedTechName = user.fullName;
+    }
+
+    if (newStatus === 'COMPLETED') {
+       updatedData.paymentConfirmed = false;
     }
 
     onStatusUpdate({ ...request, ...updatedData });
@@ -40,8 +55,8 @@ export const RequestControlPanel: React.FC<RequestControlPanelProps> = ({
         const reqRef = doc(db, 'requests', request.id);
         await updateDoc(reqRef, updatedData);
       }
-    } catch (err) {
-      console.error(err);
+    } catch {
+      setActionError(t.errorCompletingJob);
     } finally {
       setIsUpdating(false);
     }
@@ -50,33 +65,155 @@ export const RequestControlPanel: React.FC<RequestControlPanelProps> = ({
   const handleSendOffer = async () => {
     if (!offerPrice) return;
     setIsUpdating(true);
+    setActionError(null);
     try {
-       const updatedData = { 
-         quote: offerPrice, 
+       const updatedData = {
+         quote: offerPrice,
          quoteStatus: 'PROPOSED' as const,
-         status: 'ACCEPTED' as const, // For now, we auto-accept the job when offering to simplify
+         status: 'ACCEPTED' as const,
          assignedTechId: user.id,
          assignedTechName: user.fullName
        };
-       
+
        if (user.id !== 'mock_guest') {
           await updateDoc(doc(db, 'requests', request.id), updatedData);
        }
-       
+
        onStatusUpdate({ ...request, ...updatedData });
        setShowOfferForm(false);
-       
-       if (offerMessage) {
-          // You might want to send a chat message here
-          console.log("Offer message:", offerMessage);
-       }
-    } catch (err) {
-       console.error(err);
+    } catch {
+       setActionError(lang === 'AR' ? 'تعذر إرسال العرض. يرجى المحاولة مجدداً.' : 'Failed to send offer. Please try again.');
     } finally {
        setIsUpdating(false);
     }
   };
 
+  const confirmWork = async () => {
+    setIsUpdating(true);
+    setActionError(null);
+    const updatedData = {
+      paymentConfirmed: true,
+      completionConfirmedAt: serverTimestamp()
+    };
+
+    try {
+      if (user.id !== 'mock_guest') {
+        const reqRef = doc(db, 'requests', request.id);
+        await updateDoc(reqRef, updatedData);
+      }
+      onStatusUpdate({ ...request, ...updatedData });
+    } catch {
+      setActionError(t.errorCompletingJob);
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleAcceptQuote = async () => {
+    setIsUpdating(true);
+    setActionError(null);
+    const updatedData = { quoteStatus: 'ACCEPTED' as const };
+    try {
+      if (user.id !== 'mock_guest') {
+        await updateDoc(doc(db, 'requests', request.id), updatedData);
+      }
+      onStatusUpdate({ ...request, ...updatedData });
+    } catch {
+      setActionError(lang === 'AR' ? 'تعذر قبول العرض.' : 'Failed to accept offer.');
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleRejectQuote = async () => {
+    setIsUpdating(true);
+    setActionError(null);
+    const updatedData = {
+      quoteStatus: 'REJECTED' as const,
+      status: 'PENDING' as const,
+      assignedTechId: '',
+      assignedTechName: ''
+    };
+    try {
+      if (user.id !== 'mock_guest') {
+        await updateDoc(doc(db, 'requests', request.id), updatedData);
+      }
+      onStatusUpdate({ ...request, ...updatedData });
+    } catch {
+      setActionError(lang === 'AR' ? 'تعذر رفض العرض.' : 'Failed to reject offer.');
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleSendCounter = async () => {
+    if (!counterPrice) return;
+    setIsUpdating(true);
+    setActionError(null);
+    const updatedData = { quoteStatus: 'COUNTERED' as const, counterQuote: counterPrice };
+    try {
+      if (user.id !== 'mock_guest') {
+        await updateDoc(doc(db, 'requests', request.id), updatedData);
+      }
+      onStatusUpdate({ ...request, ...updatedData });
+      setShowCounterForm(false);
+    } catch {
+      setActionError(lang === 'AR' ? 'تعذر إرسال العرض المضاد.' : 'Failed to send counter offer.');
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleAcceptCounter = async () => {
+    setIsUpdating(true);
+    setActionError(null);
+    const updatedData = {
+      quoteStatus: 'ACCEPTED' as const,
+      quote: request.counterQuote || request.quote
+    };
+    try {
+      if (user.id !== 'mock_guest') {
+        await updateDoc(doc(db, 'requests', request.id), updatedData);
+      }
+      onStatusUpdate({ ...request, ...updatedData });
+    } catch {
+      setActionError(lang === 'AR' ? 'تعذر قبول العرض.' : 'Failed to accept counter.');
+    } finally {
+      setIsUpdating(false);
+    }
+  };
+
+  const handleSubmitRating = async () => {
+    if (!selectedRating) return;
+    setIsUpdating(true);
+    setActionError(null);
+    const reqUpdate = { rating: selectedRating, feedback: ratingFeedback };
+    try {
+      if (user.id !== 'mock_guest' && request.assignedTechId) {
+        await updateDoc(doc(db, 'requests', request.id), reqUpdate);
+        const techRef = doc(db, 'users', request.assignedTechId);
+        const techSnap = await getDoc(techRef);
+        if (techSnap.exists()) {
+          const data = techSnap.data();
+          const prevCount = data.ratingCount || 0;
+          const prevAvg = data.ratingAvg || 0;
+          const newCount = prevCount + 1;
+          const newAvg = ((prevAvg * prevCount) + selectedRating) / newCount;
+          await updateDoc(techRef, {
+            ratingAvg: Math.round(newAvg * 10) / 10,
+            ratingCount: newCount
+          });
+        }
+      }
+      onStatusUpdate({ ...request, ...reqUpdate });
+      analytics.then(a => a && logEvent(a, 'rate_technician', { rating: selectedRating }));
+      setRatingSubmitted(true);
+    } catch {
+      setActionError(lang === 'AR' ? 'تعذر حفظ التقييم. حاول مجدداً.' : 'Failed to save rating. Please try again.');
+    } finally {
+      setIsUpdating(false);
+    }
+  };
   const statusColors = {
       'PENDING': 'bg-yellow-100 text-yellow-700 border-yellow-200',
       'INQUIRY': 'bg-purple-100 text-purple-700 border-purple-200',
@@ -99,6 +236,64 @@ export const RequestControlPanel: React.FC<RequestControlPanelProps> = ({
       // If we had user location, we'd calculate real distance
       // For now returning a mock value
       return "2.4 km";
+  };
+
+  const generateInvoice = () => {
+    const doc = new jsPDF();
+    
+    // Logo placeholder
+    doc.setFontSize(22);
+    doc.setTextColor(249, 115, 22); // Orange-500
+    doc.text('BRICOLA', 105, 20, { align: 'center' });
+    
+    doc.setFontSize(10);
+    doc.setTextColor(100);
+    doc.text('Tunisia Service Marketplace', 105, 26, { align: 'center' });
+    
+    // Invoice details
+    doc.setFontSize(16);
+    doc.setTextColor(0);
+    doc.text('INVOICE', 20, 45);
+    
+    const timestamp = request.completionConfirmedAt?.seconds ? request.completionConfirmedAt.seconds * 1000 : Date.now();
+    const invoiceNo = `${request.id.slice(-6).toUpperCase()}-${timestamp.toString().slice(-4)}`;
+    
+    doc.setFontSize(10);
+    doc.text(`Invoice No: ${invoiceNo}`, 20, 52);
+    doc.text(`Date: ${new Date(timestamp).toLocaleDateString()}`, 20, 57);
+    
+    // Job info
+    doc.setDrawColor(240);
+    doc.line(20, 65, 190, 65);
+    
+    doc.setFontSize(12);
+    doc.text('Job Details:', 20, 75);
+    doc.setFontSize(10);
+    doc.text(`Service: ${request.serviceType}`, 30, 85);
+    doc.text(`Technician: ${request.assignedTechName || 'N/A'}`, 30, 92);
+    doc.text(`Client: ${request.clientName || 'N/A'}`, 30, 99);
+    
+    // Pricing
+    doc.setDrawColor(240);
+    doc.line(20, 110, 190, 110);
+    doc.setFontSize(12);
+    doc.text(`TOTAL AMOUNT:`, 140, 125, { align: 'right' });
+    doc.text(`${request.quote || request.budget || '0'} DT`, 180, 125, { align: 'right' });
+    
+    doc.setFontSize(8);
+    doc.setTextColor(150);
+    doc.text('Thank you for using Bricola!', 105, 150, { align: 'center' });
+    
+    doc.save(`Invoice_${invoiceNo}.pdf`);
+  };
+
+  const shareOnWhatsApp = () => {
+     const message = lang === 'AR' 
+        ? `فاتورة بريكولا: تم إنجاز المهمة "${request.serviceType}". السعر المتفق عليه: ${request.quote || request.budget} د.ت. شكراً لثقتكم!` 
+        : `Bricola Invoice: Task "${request.serviceType}" completed. Agreed price: ${request.quote || request.budget} TND. Thank you for your trust!`;
+     
+     const encodedMessage = encodeURIComponent(message);
+     window.open(`https://wa.me/?text=${encodedMessage}`, '_blank');
   };
 
   return (
@@ -144,6 +339,41 @@ export const RequestControlPanel: React.FC<RequestControlPanelProps> = ({
                  </button>
               </div>
            </div>
+        </div>
+      )}
+
+      {/* Counter-Offer Form Modal */}
+      {showCounterForm && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-[60] flex items-end sm:items-center justify-center p-0 sm:p-4 animate-fade-in">
+          <div className="bg-white w-full max-w-lg rounded-t-[2.5rem] sm:rounded-[2.5rem] p-8 shadow-2xl animate-slide-up">
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="text-xl font-black text-slate-800 uppercase tracking-tight">
+                {lang === 'AR' ? 'عرض مضاد' : 'Counter Offer'}
+              </h3>
+              <button onClick={() => setShowCounterForm(false)} className="w-10 h-10 bg-gray-100 rounded-full flex items-center justify-center text-gray-400 font-bold hover:bg-gray-200 transition-all">✕</button>
+            </div>
+            <div className="space-y-6">
+              <div>
+                <label className="text-[10px] font-black text-slate-400 block uppercase tracking-widest mb-2 px-1">
+                  {lang === 'AR' ? 'سعرك المقترح (د.ت)' : 'Your Proposed Price (DT)'}
+                </label>
+                <input
+                  type="number"
+                  value={counterPrice}
+                  onChange={(e) => setCounterPrice(e.target.value)}
+                  placeholder="e.g. 45"
+                  className="w-full p-4 bg-slate-50 border-none rounded-2xl outline-none focus:ring-2 focus:ring-orange-400 text-sm font-bold"
+                />
+              </div>
+              <button
+                onClick={handleSendCounter}
+                disabled={!counterPrice || isUpdating}
+                className="w-full py-5 bg-orange-500 text-white rounded-2xl font-black text-lg hover:bg-orange-600 transition-all shadow-xl shadow-orange-100 disabled:opacity-50 active:scale-95"
+              >
+                {isUpdating ? '...' : (lang === 'AR' ? 'إرسال العرض المضاد' : 'Send Counter Offer')}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -304,6 +534,11 @@ export const RequestControlPanel: React.FC<RequestControlPanelProps> = ({
 
         {/* Action Panel */}
         <div className="pt-4">
+           {actionError && (
+             <div className="mb-4 p-4 bg-red-50 text-red-600 rounded-2xl text-sm font-medium">
+               {actionError}
+             </div>
+           )}
            {user.role === UserRole.TECHNICIAN && request.status === 'PENDING' && (
               <div className="space-y-3">
                  <button 
@@ -330,26 +565,189 @@ export const RequestControlPanel: React.FC<RequestControlPanelProps> = ({
               </div>
            )}
 
+           {/* Client quote response — shown when technician has proposed a price */}
+           {user.role === UserRole.CLIENT && request.quoteStatus === 'PROPOSED' && request.quote && (
+              <div className="bg-white p-6 rounded-[2.5rem] shadow-sm border-2 border-blue-100 animate-fade-in">
+                 <h3 className="text-[10px] font-black text-blue-400 uppercase tracking-widest mb-4">
+                    {lang === 'AR' ? 'عرض سعر من الفني' : 'Quote from Technician'}
+                 </h3>
+                 <div className="flex items-center justify-between p-5 bg-blue-50 rounded-2xl mb-6">
+                    <div>
+                       <p className="text-[10px] text-blue-400 font-black uppercase tracking-widest">{lang === 'AR' ? 'السعر المقترح' : 'Proposed Price'}</p>
+                       <p className="text-3xl font-black text-blue-800">{request.quote} <span className="text-base font-bold text-blue-400">DT</span></p>
+                    </div>
+                    <span className="text-4xl">💸</span>
+                 </div>
+                 <div className="grid grid-cols-3 gap-3">
+                    <button onClick={handleAcceptQuote} disabled={isUpdating}
+                       className="py-4 bg-green-500 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-lg shadow-green-100 active:scale-95 transition-all disabled:opacity-50">
+                       {lang === 'AR' ? 'قبول' : 'Accept'}
+                    </button>
+                    <button onClick={() => setShowCounterForm(true)} disabled={isUpdating}
+                       className="py-4 bg-orange-500 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-lg shadow-orange-100 active:scale-95 transition-all disabled:opacity-50">
+                       {lang === 'AR' ? 'عرض مضاد' : 'Counter'}
+                    </button>
+                    <button onClick={handleRejectQuote} disabled={isUpdating}
+                       className="py-4 bg-red-50 text-red-500 rounded-2xl font-black text-xs uppercase tracking-widest active:scale-95 transition-all disabled:opacity-50">
+                       {lang === 'AR' ? 'رفض' : 'Decline'}
+                    </button>
+                 </div>
+              </div>
+           )}
+
+           {/* Client sees their counter offer is pending */}
+           {user.role === UserRole.CLIENT && request.quoteStatus === 'COUNTERED' && (
+              <div className="p-5 bg-orange-50 rounded-2xl border border-orange-100 text-center animate-fade-in">
+                 <p className="text-xs font-black text-orange-600 uppercase tracking-widest">
+                    {lang === 'AR'
+                       ? `عرضك المضاد: ${request.counterQuote} د.ت — بانتظار رد الفني`
+                       : `Counter sent: ${request.counterQuote} DT — Awaiting technician reply`}
+                 </p>
+              </div>
+           )}
+
+           {/* Technician sees the client's counter-offer */}
+           {user.role === UserRole.TECHNICIAN && request.quoteStatus === 'COUNTERED' && request.counterQuote && (
+              <div className="bg-white p-6 rounded-[2.5rem] shadow-sm border-2 border-orange-100 animate-fade-in">
+                 <h3 className="text-[10px] font-black text-orange-400 uppercase tracking-widest mb-4">
+                    {lang === 'AR' ? 'عرض مضاد من الحريف' : 'Counter Offer from Client'}
+                 </h3>
+                 <div className="flex items-center justify-between p-5 bg-orange-50 rounded-2xl mb-6">
+                    <div>
+                       <p className="text-[10px] text-orange-400 font-black uppercase tracking-widest">{lang === 'AR' ? 'السعر المضاد' : 'Counter Price'}</p>
+                       <p className="text-3xl font-black text-orange-800">{request.counterQuote} <span className="text-base font-bold text-orange-400">DT</span></p>
+                    </div>
+                    <span className="text-4xl">🤝</span>
+                 </div>
+                 <div className="grid grid-cols-2 gap-3">
+                    <button onClick={handleAcceptCounter} disabled={isUpdating}
+                       className="py-4 bg-green-500 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-lg active:scale-95 transition-all disabled:opacity-50">
+                       {lang === 'AR' ? 'قبول السعر' : 'Accept Price'}
+                    </button>
+                    <button onClick={() => setShowOfferForm(true)} disabled={isUpdating}
+                       className="py-4 bg-blue-600 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-lg active:scale-95 transition-all disabled:opacity-50">
+                       {lang === 'AR' ? 'عرض جديد' : 'New Offer'}
+                    </button>
+                 </div>
+              </div>
+           )}
+
            {request.status === 'ACCEPTED' && (
               <div className="p-6 bg-white rounded-[2rem] shadow-sm border border-gray-100 flex flex-col gap-3">
                  <div className="p-4 bg-green-50 rounded-2xl border border-green-100 text-center">
                     <p className="text-xs font-black text-green-700 uppercase tracking-widest">{lang === 'AR' ? 'المهمة قيد التنفيذ' : 'Job In Progress'}</p>
                  </div>
-                 <button 
-                    onClick={() => updateStatus('COMPLETED')}
-                    className="w-full py-5 bg-slate-900 text-white rounded-2xl font-black shadow-xl active:scale-95 transition-all flex items-center justify-center gap-3"
-                 >
-                    <span>🎯</span>
-                    {lang === 'AR' ? 'تم إنجاز العمل' : 'Mark as Completed'}
-                 </button>
+                 {user.role === UserRole.TECHNICIAN && (
+                    <button
+                       onClick={() => updateStatus('COMPLETED')}
+                       className="w-full py-5 bg-slate-900 text-white rounded-2xl font-black shadow-xl active:scale-95 transition-all flex items-center justify-center gap-3"
+                    >
+                       <span>🎯</span>
+                       {lang === 'AR' ? 'تم إنجاز العمل' : 'Mark as Completed'}
+                    </button>
+                 )}
               </div>
            )}
 
            {request.status === 'COMPLETED' && (
-              <div className="p-8 bg-green-500 rounded-[2.5rem] shadow-xl text-white text-center animate-fade-in">
-                 <span className="text-4xl mb-4 block">🏆</span>
-                 <h3 className="text-xl font-black mb-1">{lang === 'AR' ? 'تمت المهمة بنجاح!' : 'Task Completed!'}</h3>
-                 <p className="text-xs font-bold opacity-80">{lang === 'AR' ? 'شكراً لتقديم خدمتك عبر Bricola.' : 'Great job! You successfully finished this task.'}</p>
+              <div className="space-y-4">
+                 {user.role === UserRole.CLIENT && !request.paymentConfirmed ? (
+                    <div className="p-8 bg-blue-600 rounded-[2.5rem] shadow-xl text-white text-center animate-fade-in transition-all">
+                       <span className="text-4xl mb-4 block">📦</span>
+                       <h3 className="text-xl font-black mb-1">{lang === 'AR' ? 'تأكيد العمل وتحرير التقييم' : 'Confirm Work & Release Rating'}</h3>
+                       <p className="text-xs font-bold opacity-80 mb-6">{lang === 'AR' ? 'يرجى تأكيد إنجاز المهمة وإتمام الدفع النقدي لتحرير التقييم للفني.' : 'Please confirm the job is finished and cash payment made to release the rating for the technician.'}</p>
+                       <button 
+                        onClick={confirmWork}
+                        disabled={isUpdating}
+                        className="w-full py-5 bg-white text-blue-600 rounded-2xl font-black text-sm uppercase tracking-widest shadow-lg active:scale-95 transition-all flex items-center justify-center gap-2"
+                       >
+                          {isUpdating ? '...' : (
+                            <>
+                              <span>✅</span>
+                              {lang === 'AR' ? 'تأكيد العمل وفتح التقييم' : 'Confirm & Release Rating'}
+                            </>
+                          )}
+                       </button>
+                    </div>
+                 ) : (
+                    <div className={`p-8 ${request.paymentConfirmed ? 'bg-green-500' : 'bg-slate-700'} rounded-[2.5rem] shadow-xl text-white text-center animate-fade-in`}>
+                        <span className="text-4xl mb-4 block">{request.paymentConfirmed ? '🏆' : '⏳'}</span>
+                        <h3 className="text-xl font-black mb-1">
+                          {request.paymentConfirmed 
+                            ? (lang === 'AR' ? 'تمت المهمة بنجاح!' : 'Task Completed!') 
+                            : (lang === 'AR' ? 'بانتظار تأكيد الحريف' : 'Waiting for Confirmation')}
+                        </h3>
+                        <p className="text-xs font-bold opacity-80">
+                           {request.paymentConfirmed 
+                            ? (lang === 'AR' ? 'شكراً لتقديم خدمتك عبر Bricola.' : 'Great job! Rating is now available for the client.') 
+                            : (lang === 'AR' ? 'بمجرد تأكيد الحريف لإنجاز المهمة، سيتمكن من ترك تقييم لك.' : 'Once the client confirms the job completion, they can leave you a review.')}
+                        </p>
+
+                        {request.paymentConfirmed && (
+                           <div className="mt-8 flex flex-col gap-3">
+                              <button 
+                                 onClick={generateInvoice}
+                                 className="w-full py-4 bg-white/20 hover:bg-white/30 rounded-2xl font-black text-xs uppercase tracking-widest transition-all flex items-center justify-center gap-2 border border-white/20 active:scale-95"
+                              >
+                                 <span>📄</span>
+                                 {lang === 'AR' ? 'تحميل الفاتورة' : 'Download Invoice'}
+                              </button>
+                              <button 
+                                 onClick={shareOnWhatsApp}
+                                 className="w-full py-4 bg-green-600 hover:bg-green-700 rounded-2xl font-black text-xs uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-lg active:scale-95"
+                              >
+                                 <span>💬</span>
+                                 {lang === 'AR' ? 'مشاركة عبر واتساب' : 'Share via WhatsApp'}
+                              </button>
+                           </div>
+                        )}
+                    </div>
+                 )}
+              </div>
+           )}
+
+           {/* Rating prompt — shown to client after work is confirmed, before they rate */}
+           {user.role === UserRole.CLIENT && request.status === 'COMPLETED' && request.paymentConfirmed && !ratingSubmitted && request.assignedTechId && (
+              <div className="bg-white p-6 rounded-[2.5rem] shadow-sm border border-gray-100 animate-fade-in">
+                 <h3 className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-4">
+                    {lang === 'AR' ? 'قيّم الفني' : 'Rate the Technician'}
+                 </h3>
+                 <div className="flex justify-center gap-3 mb-6">
+                    {[1,2,3,4,5].map(star => (
+                       <button
+                          key={star}
+                          onClick={() => setSelectedRating(star)}
+                          className={`text-4xl transition-transform active:scale-110 ${star <= selectedRating ? 'opacity-100' : 'opacity-30'}`}
+                       >
+                          ⭐
+                       </button>
+                    ))}
+                 </div>
+                 <textarea
+                    value={ratingFeedback}
+                    onChange={(e) => setRatingFeedback(e.target.value)}
+                    placeholder={t.feedbackPlaceholder}
+                    className="w-full p-4 bg-slate-50 border-none rounded-2xl h-24 outline-none focus:ring-2 focus:ring-orange-100 resize-none text-sm font-medium mb-4"
+                 />
+                 <button
+                    onClick={handleSubmitRating}
+                    disabled={!selectedRating || isUpdating}
+                    className="w-full py-5 bg-orange-500 text-white rounded-2xl font-black shadow-xl shadow-orange-100 active:scale-95 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                 >
+                    {isUpdating ? '...' : (
+                       <>
+                          <span>⭐</span>
+                          {lang === 'AR' ? 'إرسال التقييم' : 'Submit Rating'}
+                       </>
+                    )}
+                 </button>
+              </div>
+           )}
+
+           {/* Rating submitted success */}
+           {user.role === UserRole.CLIENT && ratingSubmitted && (
+              <div className="p-5 bg-green-50 rounded-2xl border border-green-100 text-center animate-fade-in">
+                 <p className="text-sm font-black text-green-700">⭐ {t.ratingSaved}</p>
               </div>
            )}
         </div>

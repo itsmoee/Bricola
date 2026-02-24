@@ -1,8 +1,12 @@
 
 import React, { useState } from 'react';
 import { UserProfile, Language, translations, UserRole, ServiceCategory } from '../types';
-import { db } from '../firebase';
+import { db, analytics } from '../firebase';
 import { doc, updateDoc } from 'firebase/firestore';
+import { logEvent } from 'firebase/analytics';
+import { isProfileComplete } from '../utils/profileUtils';
+import { NotificationService } from '../utils/notificationService';
+import { useRemoteConfig } from '../utils/remoteConfigService';
 
 interface OnboardingProps {
     user: UserProfile;
@@ -33,28 +37,36 @@ export const Onboarding: React.FC<OnboardingProps> = ({ user, lang, onFinish }) 
             setIsSaving(true);
             try {
                 const userRef = doc(db, 'users', user.id);
+                const isComplete = isProfileComplete(user);
                 await updateDoc(userRef, {
-                    onboardingCompleted: true
+                    onboardingCompleted: true,
+                    onboardingComplete: isComplete
                 });
-            } catch (err) {
-                console.error('Error skipping onboarding:', err);
+            } catch {
+                // Silently fail — user will be directed to dashboard anyway
             } finally {
                 setIsSaving(false);
             }
         }
-        onFinish({ ...user, onboardingCompleted: true });
+        onFinish({ ...user, onboardingCompleted: true, onboardingComplete: isProfileComplete(user) });
     };
 
     const handleComplete = async () => {
         setIsSaving(true);
         try {
-            const updatedProfile = {
+            const updatedProfile: UserProfile = {
                 ...user,
                 fullName,
                 profilePictureUrl: profilePic,
                 skills: selectedSkills,
                 onboardingCompleted: true
             };
+            
+            updatedProfile.onboardingComplete = isProfileComplete(updatedProfile);
+
+            if (updatedProfile.onboardingComplete) {
+                NotificationService.cancelOnboardingReminder();
+            }
 
             if (user.id !== 'mock_guest') {
                 const userRef = doc(db, 'users', user.id);
@@ -62,13 +74,14 @@ export const Onboarding: React.FC<OnboardingProps> = ({ user, lang, onFinish }) 
                     fullName,
                     profilePictureUrl: profilePic,
                     skills: selectedSkills,
-                    onboardingCompleted: true
+                    onboardingCompleted: true,
+                    onboardingComplete: updatedProfile.onboardingComplete
                 });
             }
             onFinish(updatedProfile);
-        } catch (err) {
-            console.error(err);
-            alert('Error updating profile');
+        } catch {
+            const t2 = translations[lang] || translations.AR;
+            alert(t2.errorUpdatingProfile);
         } finally {
             setIsSaving(false);
         }
@@ -94,6 +107,112 @@ export const Onboarding: React.FC<OnboardingProps> = ({ user, lang, onFinish }) 
     };
 
     const serviceList = Object.values(ServiceCategory);
+
+    const { onboardingStyle } = useRemoteConfig();
+
+    if (onboardingStyle === 'single_page') {
+        return (
+            <div className="fixed inset-0 bg-white z-[200] flex flex-col animate-fade-in overflow-y-auto">
+                <div className="p-6 flex justify-end">
+                    <button
+                        onClick={handleSkip}
+                        className="text-xs font-black text-gray-400 uppercase tracking-widest hover:text-orange-500 transition-colors"
+                    >
+                        {lang === 'AR' ? 'تخطي' : 'Skip'}
+                    </button>
+                </div>
+                <div className="flex-1 p-8 flex flex-col gap-8 max-w-lg mx-auto w-full pb-32">
+                    <div className="text-center">
+                        <h2 className="text-3xl font-black text-gray-800 mb-2">
+                            {lang === 'AR' ? 'أكمل ملفك الشخصي' : 'Complete Your Profile'}
+                        </h2>
+                        <p className="text-gray-400 font-medium text-sm">
+                            {lang === 'AR' ? 'كل شيء في خطوة واحدة' : 'Everything in one step'}
+                        </p>
+                    </div>
+
+                    <div className="flex flex-col items-center gap-4">
+                        <label className="relative cursor-pointer group">
+                            <div className="w-28 h-28 rounded-[2.5rem] bg-orange-50 border-4 border-white shadow-xl flex items-center justify-center overflow-hidden group-hover:scale-105 transition-transform">
+                                {profilePic ? (
+                                    <img src={profilePic} className="w-full h-full object-cover" alt="Profile" />
+                                ) : (
+                                    <span className="text-4xl">📸</span>
+                                )}
+                            </div>
+                            <div className="absolute -bottom-2 -right-2 w-10 h-10 bg-orange-500 text-white rounded-2xl flex items-center justify-center shadow-lg border-2 border-white">+</div>
+                            <input type="file" className="hidden" accept="image/*" onChange={handlePhotoUpload} />
+                        </label>
+                    </div>
+
+                    <div>
+                        <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2 block px-2">
+                            {lang === 'AR' ? 'الاسم الكامل' : 'Full Name'}
+                        </label>
+                        <input
+                            type="text"
+                            value={fullName}
+                            onChange={(e) => setFullName(e.target.value)}
+                            placeholder={lang === 'AR' ? 'أدخل اسمك هنا' : 'Enter your name'}
+                            className="w-full p-5 bg-gray-50 border-none rounded-[1.5rem] outline-none focus:ring-4 focus:ring-orange-100 text-lg font-bold"
+                        />
+                    </div>
+
+                    {user.role === UserRole.TECHNICIAN && (
+                        <div>
+                            <label className="text-[10px] font-black text-gray-400 uppercase tracking-widest mb-3 block px-2">
+                                {lang === 'AR' ? 'تخصصاتك' : 'Your Specialties'}
+                            </label>
+                            <div className="grid grid-cols-2 gap-3">
+                                {serviceList.map((skillKey) => {
+                                    const isSelected = selectedSkills.includes(skillKey);
+                                    const label = (t as any)[skillKey.toLowerCase()] || skillKey;
+                                    return (
+                                        <button
+                                            key={skillKey}
+                                            onClick={() => toggleSkill(skillKey)}
+                                            className={`p-4 rounded-3xl border-2 transition-all flex flex-col items-center gap-2 text-center ${
+                                                isSelected
+                                                ? 'bg-orange-500 border-orange-500 text-white shadow-lg shadow-orange-200 scale-105'
+                                                : 'border-gray-100 text-gray-400 hover:border-orange-200'
+                                            }`}
+                                        >
+                                            <span className="text-2xl">
+                                                {skillKey === ServiceCategory.PLUMBER && '🚰'}
+                                                {skillKey === ServiceCategory.ELECTRICIAN && '⚡'}
+                                                {skillKey === ServiceCategory.AC_REPAIR && '❄️'}
+                                                {skillKey === ServiceCategory.PAINTER && '🎨'}
+                                                {skillKey === ServiceCategory.CARPENTER && '🪚'}
+                                                {skillKey === ServiceCategory.MASON && '🧱'}
+                                                {skillKey === ServiceCategory.CLEANING && '🧹'}
+                                                {skillKey === ServiceCategory.OTHER && '🛠️'}
+                                            </span>
+                                            <span className="text-[10px] font-black uppercase tracking-tight">{label}</span>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+                </div>
+
+                <div className="sticky bottom-0 p-8 bg-white/90 backdrop-blur-sm border-t border-gray-50">
+                    <button
+                        onClick={handleComplete}
+                        disabled={isSaving}
+                        className="w-full py-5 bg-slate-900 text-white rounded-[2rem] font-black text-lg shadow-xl active:scale-95 transition-all flex items-center justify-center gap-3"
+                    >
+                        {isSaving ? '...' : (
+                            <>
+                                {lang === 'AR' ? 'ابدأ الاستخدام' : 'Get Started'}
+                                <span className="text-xl">✨</span>
+                            </>
+                        )}
+                    </button>
+                </div>
+            </div>
+        );
+    }
 
     return (
         <div className="fixed inset-0 bg-white z-[200] flex flex-col animate-fade-in">

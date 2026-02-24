@@ -6,6 +6,7 @@ export enum UserRole {
 }
 
 export type TechStatus = 'PENDING' | 'APPROVED' | 'REJECTED';
+export type AvailabilityStatus = 'AVAILABLE' | 'BUSY' | 'VACATION';
 export type RequestStatus = 'PENDING' | 'ACCEPTED' | 'COMPLETED' | 'INQUIRY';
 export type Language = 'AR' | 'EN';
 
@@ -49,7 +50,22 @@ export interface UserProfile {
   ratingCount?: number;
   bio?: string;
   onboardingCompleted?: boolean;
+  onboardingComplete?: boolean;
+  reminderScheduled?: boolean;
+  availabilityStatus?: AvailabilityStatus;
+  referredBy?: string; // ID of the user who referred this new user
 }
+
+/**
+ * FEATURE 1 - Technician Availability Status
+ * Fields added: availabilityStatus (AVAILABLE|BUSY|VACATION)
+ * 
+ * FEATURE 5 - Onboarding Recovery
+ * Fields added: onboardingComplete (boolean), reminderScheduled (boolean)
+ * 
+ * FEATURE 6 - Share / Referral Mechanic
+ * Fields added: referredBy (string)
+ */
 
 export interface ServiceRequest {
   id: string;
@@ -66,6 +82,8 @@ export interface ServiceRequest {
   createdAt: string;
   rating?: number;
   feedback?: string;
+  paymentConfirmed?: boolean;
+  completionConfirmedAt?: any;
   quote?: string;
   quoteStatus?: 'PROPOSED' | 'ACCEPTED' | 'REJECTED' | 'COUNTERED';
   counterQuote?: string;
@@ -75,6 +93,11 @@ export interface ServiceRequest {
   budget?: string; // proposed budget if any
   distance?: string; // calculated distance for technician
 }
+
+/**
+ * FEATURE 2 - Payment Confirmation
+ * Fields added: paymentConfirmed (boolean), completionConfirmedAt (timestamp)
+ */
 
 export interface ChatMessage {
   id: string;
@@ -131,6 +154,32 @@ export const translations = {
     profilePicture: 'الصورة الشخصية',
     idCard: 'بطاقة التعريف (CIN)',
     cv: 'السيرة الذاتية (CV)',
+    availability: 'حالة التوافر',
+    availableToday: 'متاح للعمل اليوم',
+    busyThisWeek: 'مشغول هذا الأسبوع',
+    onVacation: 'في عطلة',
+    incompleteProfile: 'ملفك الشخصي غير مكتمل — أكمله للبدء في تلقي الطلبات',
+    finishSetup: 'أكمل الإعداد',
+    cleaning: 'تنظيف',
+    other: 'أخرى',
+    pleaseWait: 'يرجى الانتظار...',
+    exit: 'الخروج',
+    verifying: 'جاري التحقق...',
+    creatingAccount: 'إنشاء الحساب...',
+    checkingData: 'التحقق من البيانات...',
+    preparingProfile: 'تجهيز الملف الشخصي...',
+    loggingIn: 'تسجيل الدخول...',
+    fetchingData: 'جلب البيانات...',
+    registrationComplete: 'اكتمل التسجيل!',
+    adminCodeError: 'كود الإدارة غير صحيح. لا يمكن إنشاء حساب مسؤول.',
+    errorUpdatingProfile: 'حدث خطأ أثناء تحديث الملف الشخصي.',
+    errorSaving: 'حدث خطأ أثناء الحفظ. يرجى المحاولة مجدداً.',
+    errorSendingMessage: 'تعذر إرسال الرسالة. يرجى المحاولة مجدداً.',
+    errorStartingChat: 'تعذر بدء المحادثة. يرجى المحاولة مجدداً.',
+    errorCompletingJob: 'حدث خطأ أثناء إنهاء المهمة.',
+    uploadSuccess: 'تم الرفع بنجاح!',
+    profileUpdated: 'تم تحديث الملف الشخصي بنجاح!',
+    savedSuccess: 'تم الحفظ بنجاح',
   },
   EN: {
     settings: 'Settings',
@@ -176,5 +225,31 @@ export const translations = {
     profilePicture: 'Profile Picture',
     idCard: 'ID Card / CIN',
     cv: 'Resume / CV',
+    availability: 'Availability',
+    availableToday: 'Available Today',
+    busyThisWeek: 'Busy This Week',
+    onVacation: 'On Vacation',
+    incompleteProfile: 'Your profile is incomplete — complete it to start receiving jobs',
+    finishSetup: 'Finish Setup',
+    cleaning: 'Cleaning',
+    other: 'Other',
+    pleaseWait: 'Please wait...',
+    exit: 'Exit',
+    verifying: 'Verifying...',
+    creatingAccount: 'Creating account...',
+    checkingData: 'Checking data...',
+    preparingProfile: 'Preparing profile...',
+    loggingIn: 'Signing in...',
+    fetchingData: 'Fetching data...',
+    registrationComplete: 'Registration complete!',
+    adminCodeError: 'Invalid admin code. Cannot create an admin account.',
+    errorUpdatingProfile: 'An error occurred while updating your profile.',
+    errorSaving: 'An error occurred while saving. Please try again.',
+    errorSendingMessage: 'Failed to send message. Please try again.',
+    errorStartingChat: 'Failed to start chat. Please try again.',
+    errorCompletingJob: 'An error occurred while completing the job.',
+    uploadSuccess: 'Uploaded successfully!',
+    profileUpdated: 'Profile updated successfully!',
+    savedSuccess: 'Saved successfully',
   }
 };

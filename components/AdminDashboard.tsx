@@ -33,12 +33,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ user, onLogout, 
       const unsubscribe = onSnapshot(q, (snapshot) => {
         setTechs(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as UserProfile[]);
       }, (e) => {
-        console.error('Tech fetch error:', e);
         setError(e.message);
       });
       return () => unsubscribe();
     } catch (err: any) {
-      console.error('Tech fetch hook error:', err);
       setError(err.message);
     }
   }, []);
@@ -57,12 +55,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ user, onLogout, 
       const unsubscribe = onSnapshot(q, (snapshot) => {
         setRequests(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })) as ServiceRequest[]);
       }, (e) => {
-        console.error('Request fetch error:', e);
         setError(e.message);
       });
       return () => unsubscribe();
     } catch (err: any) {
-      console.error('Request fetch hook error:', err);
       setError(err.message);
     }
   }, []);
@@ -78,20 +74,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ user, onLogout, 
       const newNotif: AppNotification = {
         id: 'notif_' + Date.now(),
         title: newStatus === 'APPROVED' ? 'تم تفعيل حسابك' : 'تم رفض الحساب',
-        body: newStatus === 'APPROVED' 
-          ? 'مبروك! يمكنك الآن استقبال الطلبات.' 
+        body: newStatus === 'APPROVED'
+          ? 'مبروك! يمكنك الآن استقبال الطلبات.'
           : 'عذراً، لم نتمكن من قبول حسابك. يرجى مراجعة الوثائق.',
         createdAt: new Date().toLocaleDateString(),
         read: false
       };
-      
+
       await updateDoc(techRef, {
         status: newStatus,
         notifications: arrayUnion(newNotif)
       });
-    } catch (err) {
-      console.error('Error updating technician:', err);
-      alert('Failed to update status');
+    } catch {
+      alert(lang === 'AR' ? 'تعذر تحديث الحالة.' : 'Failed to update status.');
     }
   };
 

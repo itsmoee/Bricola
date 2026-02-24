@@ -1,10 +1,14 @@
 
-import React, { useState } from 'react';
-import { UserProfile, Language, translations, UserRole } from '../types';
+import React, { useState, useMemo } from 'react';
+import { UserProfile, Language, translations, UserRole, AvailabilityStatus } from '../types';
 import { db, storage } from '../firebase';
 import { doc, updateDoc } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { tunisianCities, getTunisianCityAr } from '../utils/tunisia-locations';
+import { getTechnicianBadge } from '../utils/badgeUtils';
+import { isProfileComplete } from '../utils/profileUtils';
+import { NotificationService } from '../utils/notificationService';
+import { Share } from '@capacitor/share';
 
 interface ProfilePageProps {
   user: UserProfile;
@@ -19,8 +23,20 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
   const t = translations[lang] || translations.AR;
   const [fullName, setFullName] = useState(user.fullName);
   const [phone, setPhone] = useState(user.phone || '');
+  const [availabilityStatus, setAvailabilityStatus] = useState<AvailabilityStatus>(user.availabilityStatus || 'AVAILABLE');
   const [isSaving, setIsSaving] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const profileCompletionScore = useMemo(() => {
+    const fields = ['fullName', 'phone', 'location', 'profilePictureUrl', 'cvUrl', 'skills', 'galleryUrls'];
+    let score = 0;
+    fields.forEach(f => {
+      const val = (user as any)[f];
+      if (val && (Array.isArray(val) ? val.length > 0 : val !== '')) score += 1;
+    });
+    return Math.round((score / fields.length) * 100);
+  }, [user]);
 
   // Tunisia Location dropdown logic
   const [selectedCity, setSelectedCity] = useState(() => {
@@ -36,7 +52,7 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
 
   const handleFileUpload = async (field: keyof UserProfile, file: File) => {
     if (!file) return;
-    
+
     // Size check: limit to 5MB
     if (file.size > 5 * 1024 * 1024) {
       alert(lang === 'AR' ? 'حجم الملف كبير جداً (أقصى حد 5 ميجابايت)' : 'File is too large (max 5MB)');
@@ -53,26 +69,29 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
       // Use "profile_pics" folder for clarity across roles
       const folder = field === 'profilePictureUrl' ? 'avatars' : 'tech_docs';
       const storageRef = ref(storage, `${folder}/${user.id}/${field}_${Date.now()}`);
-      
-      console.log('Uploading file to:', storageRef.fullPath);
+
       const uploadResult = await uploadBytes(storageRef, file);
-      console.log('Upload successful, path:', uploadResult.ref.fullPath);
-      
-      const url = await getDownloadURL(storageRef);
-      console.log('Got download URL:', url);
-      
+      const url = await getDownloadURL(uploadResult.ref);
+
       const userRef = doc(db, 'users', user.id);
-      const updateData = { [field]: url };
-      
-      console.log('Updating document:', user.id, updateData);
+      const updatedUser: UserProfile = { ...user, [field]: url };
+      updatedUser.onboardingComplete = isProfileComplete(updatedUser);
+
+      if (updatedUser.onboardingComplete) {
+        NotificationService.cancelOnboardingReminder();
+      }
+
+      const updateData: any = {
+        [field]: url,
+        onboardingComplete: updatedUser.onboardingComplete
+      };
+
       await updateDoc(userRef, updateData);
-      
+
       // Update local state and notify parent
-      const updatedUser = { ...user, [field]: url };
       onUpdateProfile(updatedUser);
-      alert(lang === 'AR' ? 'تم رفع الصورة بنجاح!' : 'File uploaded successfully!');
+      alert(t.uploadSuccess);
     } catch (err: any) {
-      console.error('Upload error details:', err);
       alert(lang === 'AR' ? `فشل الرفع: ${err.message}` : `Upload failed: ${err.message}`);
     } finally {
       setIsUploading(false);
@@ -81,14 +100,22 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
 
   const handleSave = async () => {
     setIsSaving(true);
+    setSaveError(null);
     const complexLocation = selectedCity ? (selectedPlace ? `${selectedCity}, ${selectedPlace}` : selectedCity) : user.location;
-    
-    const updatedUser = {
+
+    const updatedUser: UserProfile = {
       ...user,
       fullName,
       phone,
       location: complexLocation,
+      availabilityStatus,
     };
+
+    updatedUser.onboardingComplete = isProfileComplete(updatedUser);
+
+    if (updatedUser.onboardingComplete) {
+      NotificationService.cancelOnboardingReminder();
+    }
 
     if (user.id !== 'mock_guest') {
       try {
@@ -97,15 +124,47 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
           fullName,
           phone,
           location: complexLocation,
+          availabilityStatus,
+          onboardingComplete: updatedUser.onboardingComplete
         });
-      } catch (err) {
-        console.error('Error updating profile:', err);
+      } catch {
+        setSaveError(t.errorSaving);
+        setIsSaving(false);
+        return;
       }
     }
 
     onUpdateProfile(updatedUser);
     setIsSaving(false);
-    alert(lang === 'AR' ? 'تم تحديث الملف الشخصي بنجاح!' : 'Profile updated successfully!');
+    alert(t.profileUpdated);
+  };
+
+  const handleShare = async () => {
+    const profileUrl = `https://bricola.app/tech/${user.id}`;
+    const specialtyText = user.skills && user.skills.length > 0 ? user.skills[0] : (lang === 'AR' ? 'فني' : 'Technician');
+    
+    const message = lang === 'AR' 
+      ? `تحقق من ملفي الشخصي في بريكولا! ${user.fullName} (${specialtyText}). اطلب خدماتي هنا: ${profileUrl}`
+      : `Check out my profile on Bricola! ${user.fullName} (${specialtyText}). Request my services here: ${profileUrl}`;
+    
+    try {
+      if (typeof navigator.share === 'function') {
+        await navigator.share({
+          title: 'Bricola Profile',
+          text: message,
+          url: profileUrl,
+        });
+      } else {
+        await Share.share({
+          title: 'Bricola Profile',
+          text: message,
+          url: profileUrl,
+          dialogTitle: lang === 'AR' ? 'مشاركة الملف الشخصي' : 'Share Profile'
+        });
+      }
+    } catch {
+      // Share cancelled or failed — no action needed
+    }
   };
 
   return (
@@ -114,9 +173,20 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
         <button onClick={onBack} className="text-gray-400 font-bold flex items-center gap-2">
           {lang === 'AR' ? '← رجوع' : 'Back →'}
         </button>
-        <h2 className="text-2xl font-black text-gray-800 tracking-tight">
-            {lang === 'AR' ? 'ملفي الشخصي' : 'My Profile'}
-        </h2>
+        <div className="flex items-center gap-2">
+           {user.role === UserRole.TECHNICIAN && (
+              <button 
+                onClick={handleShare}
+                className="w-10 h-10 flex items-center justify-center bg-orange-50 text-orange-500 rounded-xl hover:bg-orange-100 transition-colors"
+                title={lang === 'AR' ? 'مشاركة' : 'Share'}
+              >
+                📤
+              </button>
+           )}
+           <h2 className="text-2xl font-black text-gray-800 tracking-tight">
+              {lang === 'AR' ? 'ملفي الشخصي' : 'My Profile'}
+           </h2>
+        </div>
       </header>
 
       <div className="flex flex-col items-center mb-8 relative">
@@ -147,35 +217,44 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
             {user.role} - ID: {user.id.substring(0, 8)}
           </p>
 
+          {user.role === UserRole.TECHNICIAN && (
+            <div className={`mt-3 flex items-center gap-1.5 px-3 py-1 rounded-full ${getTechnicianBadge(user).bgColor} border border-opacity-50`}>
+              <span className="text-xs">
+                {getTechnicianBadge(user).tier === 'PRO_VERIFIED' ? '🏆' : 
+                 getTechnicianBadge(user).tier === 'TRUSTED' ? '🛡️' : '✨'}
+              </span>
+              <span 
+                className="text-[10px] font-black uppercase tracking-wider" 
+                style={{ color: getTechnicianBadge(user).color }}
+              >
+                {lang === 'AR' ? getTechnicianBadge(user).label.AR : getTechnicianBadge(user).label.EN}
+              </span>
+            </div>
+          )}
+
           {/* Profile Completion Bar */}
           <div className="mt-6 w-full max-w-sm px-6">
               <div className="flex justify-between items-center mb-1 text-[10px] font-black uppercase tracking-widest">
                   <span className="text-gray-400">{lang === 'AR' ? 'اكتمال الملف الشخصي' : 'Profile Completion'}</span>
-                  <span className="text-orange-500">{(() => {
-                      let score = 0;
-                      const fields = ['fullName', 'phone', 'location', 'profilePictureUrl', 'cvUrl', 'skills', 'galleryUrls'];
-                      fields.forEach(f => {
-                          const val = (user as any)[f];
-                          if (val && (Array.isArray(val) ? val.length > 0 : val !== '')) score += 1;
-                      });
-                      return Math.round((score / fields.length) * 100);
-                  })()}%</span>
+                  <span className="text-orange-500">{profileCompletionScore}%</span>
               </div>
               <div className="w-full bg-gray-100 h-2.5 rounded-full overflow-hidden shadow-inner">
-                  <div 
+                  <div
                       className="h-full bg-orange-500 transition-all duration-1000 ease-out"
-                      style={{ width: `${(() => {
-                          let score = 0;
-                          const fields = ['fullName', 'phone', 'location', 'profilePictureUrl', 'cvUrl', 'skills', 'galleryUrls'];
-                          fields.forEach(f => {
-                              const val = (user as any)[f];
-                              if (val && (Array.isArray(val) ? val.length > 0 : val !== '')) score += 1;
-                          });
-                          return Math.round((score / fields.length) * 100);
-                      })()}%` }}
+                      style={{ width: `${profileCompletionScore}%` }}
                   />
               </div>
           </div>
+
+          {user.role === UserRole.TECHNICIAN && (
+             <button 
+               onClick={handleShare}
+               className="mt-4 flex items-center gap-2 px-6 py-2.5 bg-orange-500 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-lg shadow-orange-500/30 hover:scale-105 active:scale-95 transition-all"
+             >
+               <span>📤</span>
+               {lang === 'AR' ? 'مشاركة ملفي الشخصي' : 'Share My Profile'}
+             </button>
+          )}
       </div>
 
       <div className="space-y-6">
@@ -229,9 +308,43 @@ export const ProfilePage: React.FC<ProfilePageProps> = ({
                     )}
                 </div>
               </div>
+
+              {user.role === UserRole.TECHNICIAN && (
+                <div className="space-y-4 pt-4 border-t border-gray-100">
+                    <label className="text-[10px] font-black text-gray-400 uppercase px-1">
+                      {t.availability}
+                    </label>
+                    <div className="grid grid-cols-3 gap-2">
+                        {(['AVAILABLE', 'BUSY', 'VACATION'] as AvailabilityStatus[]).map((status) => (
+                          <button
+                            key={status}
+                            type="button"
+                            onClick={() => setAvailabilityStatus(status)}
+                            className={`py-3 px-1 rounded-2xl text-[10px] font-bold transition-all border-2 ${
+                                availabilityStatus === status
+                                ? status === 'AVAILABLE' ? 'bg-green-50 border-green-500 text-green-700' :
+                                    status === 'BUSY' ? 'bg-red-50 border-red-500 text-red-700' :
+                                    'bg-gray-100 border-gray-500 text-gray-700'
+                                : 'bg-white border-transparent text-gray-400 hover:bg-gray-50 shadow-sm'
+                            }`}
+                          >
+                            {status === 'AVAILABLE' ? t.availableToday :
+                             status === 'BUSY' ? t.busyThisWeek :
+                             t.onVacation}
+                          </button>
+                        ))}
+                    </div>
+                </div>
+              )}
           </div>
 
-          <button 
+          {saveError && (
+            <div className="p-4 bg-red-50 text-red-600 rounded-2xl text-sm font-medium">
+              {saveError}
+            </div>
+          )}
+
+          <button
             onClick={handleSave}
             disabled={isSaving || isUploading}
             className="w-full py-5 bg-orange-600 text-white rounded-[2rem] font-black text-lg shadow-xl shadow-orange-100 active:scale-95 transition-all disabled:opacity-50"

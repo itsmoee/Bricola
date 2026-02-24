@@ -1,0 +1,83 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Check that the Bricola doc ID (uid_ROLE) belongs to the current Firebase Auth user
+    function isMyDoc(docId) {
+      return docId.matches(request.auth.uid + '_.*');
+    }
+
+    // Check if the current user has an ADMIN profile document in Firestore
+    function isAdmin() {
+      return request.auth != null &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid + '_ADMIN'));
+    }
+
+    // ─── users collection ────────────────────────────────────────────────────
+    // Doc IDs are formatted as: {uid}_{ROLE}  (e.g. abc123_CLIENT)
+    match /users/{userId} {
+      // Any authenticated user can read profiles (needed for browsing technicians)
+      allow read: if request.auth != null;
+
+      // A user may only create their own profile document
+      allow create: if request.auth != null && isMyDoc(userId);
+
+      // A user may update their own document; admins may update any document
+      // (admin uses this to set status: APPROVED / REJECTED)
+      allow update: if request.auth != null && (isMyDoc(userId) || isAdmin());
+
+      // Only admins may delete user documents
+      allow delete: if isAdmin();
+    }
+
+    // ─── requests collection ─────────────────────────────────────────────────
+    match /requests/{requestId} {
+      // Any authenticated user can read requests
+      // Technicians need to see all PENDING requests matching their skills
+      allow read: if request.auth != null;
+
+      // Any authenticated user can create a request
+      allow create: if request.auth != null;
+
+      // The client who owns the request, the assigned technician, or an admin
+      // may update it
+      allow update: if request.auth != null && (
+        isMyDoc(resource.data.clientId) ||
+        isMyDoc(resource.data.get('assignedTechId', '')) ||
+        isAdmin()
+      );
+
+      // Only admins may hard-delete requests
+      allow delete: if isAdmin();
+
+      // ─── messages sub-collection ─────────────────────────────────────────
+      match /messages/{messageId} {
+        // Participants in the request can read messages
+        allow read: if request.auth != null;
+
+        // Only the sender can create a message (verified by senderId field)
+        allow create: if request.auth != null &&
+          isMyDoc(request.resource.data.senderId);
+
+        // Messages are immutable once sent
+        allow update, delete: if false;
+      }
+    }
+    // ─── referral_events collection ──────────────────────────────────────────
+    // Written at signup when a referral code was present.
+    // Documents contain: { newUserId, newUserName, referrerId, createdAt }
+    match /referral_events/{eventId} {
+      // Only the newly signed-up user may create their own referral event
+      allow create: if request.auth != null &&
+        request.resource.data.newUserId == request.auth.uid;
+      // The referrer can read events addressed to them; admins read all
+      allow read: if request.auth != null && (
+        isAdmin() ||
+        resource.data.referrerId.matches(request.auth.uid + '_.*')
+      );
+      // Immutable once created; only admin may delete
+      allow update: if false;
+      allow delete: if isAdmin();
+    }
+  }
+}

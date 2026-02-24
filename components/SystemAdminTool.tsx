@@ -77,17 +77,6 @@ export const SystemAdminTool: React.FC = () => {
                     </div>
                 </div>
 
-                <div className="bg-slate-900 rounded-2xl p-6 mb-8 border border-slate-700">
-                    <h3 className="text-xs font-black uppercase tracking-widest text-slate-500 mb-4">Admins to Keep:</h3>
-                    <ul className="space-y-2">
-                        {ADMIN_EMAILS.map(email => (
-                            <li key={email} className="text-sm font-bold flex items-center gap-2">
-                                <span className="w-2 h-2 bg-green-500 rounded-full"></span> {email}
-                            </li>
-                        ))}
-                    </ul>
-                </div>
-
                 <div className="bg-slate-950 rounded-2xl p-4 h-48 overflow-y-auto font-mono text-[10px] space-y-1 mb-6 border border-slate-800">
                     {log.map((line, i) => <div key={i} className="text-slate-400">{line}</div>)}
                     {log.length === 0 && <div className="text-slate-600">Waiting for trigger...</div>}

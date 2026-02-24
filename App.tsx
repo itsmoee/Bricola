@@ -9,23 +9,83 @@ import { ProfilePage } from './components/ProfilePage';
 import { RequestControlPanel } from './components/RequestControlPanel';
 import { Onboarding } from './components/Onboarding';
 import { SystemAdminTool } from './components/SystemAdminTool';
-import { UserRole, UserProfile, ServiceRequest } from './types';
+import { UserRole, UserProfile, ServiceRequest, translations } from './types';
 import { useAuth } from './context/AuthContext';
 import { useLanguage } from './context/LanguageContext';
 import { NotificationService } from './utils/notificationService';
-import { analytics } from './firebase';
+import { analytics, db } from './firebase';
 import { logEvent } from 'firebase/analytics';
+import { App as CapApp } from '@capacitor/app';
+import { doc, getDoc } from 'firebase/firestore';
 
 const App: React.FC = () => {
   const { profile: user, loading, logout, setProfile } = useAuth();
   const { language, setLanguage } = useLanguage();
   
   const [currentStep, setCurrentStep] = useState<'WELCOME' | 'AUTH' | 'DASHBOARD' | 'SETTINGS' | 'PROFILE' | 'REQUEST_DETAILS' | 'ONBOARDING' | 'SYSTEM_RESET'>('WELCOME');
+
+  useEffect(() => {
+    const setupDeepLinks = async () => {
+      // For initial launch from a link
+      const launchUrl = await CapApp.getLaunchUrl();
+      if (launchUrl) {
+         handleIncomingUrl(launchUrl.url);
+      }
+
+      // While app is already open
+      CapApp.addListener('appUrlOpen', (data) => {
+        handleIncomingUrl(data.url);
+      });
+    };
+
+    const handleIncomingUrl = (urlStr: string) => {
+      if (!urlStr) return;
+      try {
+        const url = new URL(urlStr);
+        // Check if it's a Firebase Dynamic Link or a direct deep link
+        const deepLink = url.searchParams.get('link');
+        const processingUrl = deepLink ? new URL(deepLink) : url;
+
+        if (processingUrl.pathname.includes('/ref/')) {
+           const parts = processingUrl.pathname.split('/ref/');
+           const refId = parts[1].split('/')[0];
+           if (refId) {
+              localStorage.setItem('bricola_referred_by', refId);
+           }
+        }
+
+        if (processingUrl.pathname.includes('/tech/')) {
+           const parts = processingUrl.pathname.split('/tech/');
+           const techId = parts[1].split('/')[0];
+           if (techId) {
+              localStorage.setItem('bricola_view_tech_profile', techId);
+           }
+        }
+      } catch {
+        // Silently ignore malformed URLs
+      }
+    };
+
+    setupDeepLinks();
+  }, []);
+
   const [previousStep, setPreviousStep] = useState<'WELCOME' | 'AUTH' | 'DASHBOARD' | 'SETTINGS' | 'PROFILE' | 'REQUEST_DETAILS' | 'ONBOARDING' | 'SYSTEM_RESET'>('WELCOME');
   const [selectedRequest, setSelectedRequest] = useState<ServiceRequest | null>(null);
   const [selectedRole, setSelectedRole] = useState<UserRole | null>(() => {
     return localStorage.getItem('bricola_selected_role') as UserRole | null;
   });
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   useEffect(() => {
     // Analytics tracking for app start
@@ -54,6 +114,12 @@ const App: React.FC = () => {
       }
     }
   }, [user, loading]);
+
+  useEffect(() => {
+    if (user && user.id !== 'mock_guest' && user.onboardingComplete !== true && !user.reminderScheduled) {
+       NotificationService.scheduleOnboardingReminder(user.id, language as any);
+    }
+  }, [user, language]);
 
   useEffect(() => {
     document.documentElement.dir = language === 'AR' ? 'rtl' : 'ltr';
@@ -139,9 +205,17 @@ const App: React.FC = () => {
 
   return (
     <div className={`flex flex-col min-h-screen relative overflow-hidden bg-white ${language === 'AR' ? 'text-right' : 'text-left'}`} style={{ paddingTop: 'env(safe-area-inset-top)' }}>
-      {/* Secret trigger: Double click top left of screen on welcome */}
-      {currentStep === 'WELCOME' && (
-        <div 
+      {/* Offline banner */}
+      {!isOnline && (
+        <div className="fixed top-0 inset-x-0 z-[9999] flex items-center justify-center gap-2 bg-slate-800 text-white text-xs font-black py-2 px-4 uppercase tracking-widest">
+          <span>📵</span>
+          {language === 'AR' ? 'لا يوجد اتصال بالإنترنت — وضع عدم الاتصال' : 'No internet connection — Offline mode'}
+        </div>
+      )}
+
+      {/* Secret trigger: Triple-click top-left — only accessible to authenticated admins */}
+      {currentStep === 'DASHBOARD' && user?.role === UserRole.ADMIN && (
+        <div
           onClick={(e) => {
             if (e.detail === 3) setCurrentStep('SYSTEM_RESET');
           }}
@@ -149,7 +223,7 @@ const App: React.FC = () => {
         />
       )}
 
-      {currentStep === 'SYSTEM_RESET' && <SystemAdminTool />}
+      {currentStep === 'SYSTEM_RESET' && user?.role === UserRole.ADMIN && <SystemAdminTool />}
 
       <main className="flex-1 overflow-y-auto">
         {currentStep === 'WELCOME' && (
@@ -174,6 +248,7 @@ const App: React.FC = () => {
                 onLogout={handleLogout} 
                 onSettings={handleOpenSettings} 
                 onProfile={handleOpenProfile}
+                onOnboarding={() => setCurrentStep('ONBOARDING')}
                 onUpdateProfile={handleUpdateProfile}
                 onRequestDetails={handleOpenRequestDetails}
                 lang={language} 
@@ -218,8 +293,8 @@ const App: React.FC = () => {
 
         {currentStep === 'DASHBOARD' && !user && (
           <div className="flex h-screen items-center justify-center bg-gray-50 flex-col gap-4">
-             <p className="text-gray-500 font-bold">يرجى الانتظار...</p>
-             <button onClick={handleLogout} className="text-orange-500 underline">الخروج</button>
+             <p className="text-gray-500 font-bold">{translations[language]?.pleaseWait || 'Please wait...'}</p>
+             <button onClick={handleLogout} className="text-orange-500 underline">{translations[language]?.exit || 'Exit'}</button>
           </div>
         )}
 

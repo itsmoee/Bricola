@@ -25,12 +25,14 @@ dist-ssr
 
 # Confidential / Secret files
 google-services.json
-firebase.ts
 .env
 .env.*
-! .env.example
+!.env.example
 *.jks
 *.keystore
+
+# Claude Code temp files
+tmpclaude-*
 
 # Android build outputs
 android/app/google-services.json

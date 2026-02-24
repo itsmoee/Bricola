@@ -1,6 +1,7 @@
 
-import React from 'react';
+import React, { useMemo } from 'react';
 import { UserProfile, Language, translations, UserRole } from '../types';
+import { Share } from '@capacitor/share';
 
 interface SideMenuProps {
   user: UserProfile;
@@ -12,10 +13,20 @@ interface SideMenuProps {
   onOpenChat: () => void;
 }
 
-export const SideMenu: React.FC<SideMenuProps> = ({ 
-  user, lang, isOpen, onClose, onNavigate, onLogout, onOpenChat 
+export const SideMenu: React.FC<SideMenuProps> = ({
+  user, lang, isOpen, onClose, onNavigate, onLogout, onOpenChat
 }) => {
   const t = translations[lang] || translations.AR;
+
+  const profileCompletionScore = useMemo(() => {
+    const fields = ['fullName', 'phone', 'location', 'profilePictureUrl', 'cvUrl', 'skills', 'galleryUrls'];
+    let score = 0;
+    fields.forEach(f => {
+      const val = (user as any)[f];
+      if (val && (Array.isArray(val) ? val.length > 0 : val !== '')) score += 1;
+    });
+    return Math.round((score / fields.length) * 100);
+  }, [user]);
 
   return (
     <>
@@ -61,28 +72,12 @@ export const SideMenu: React.FC<SideMenuProps> = ({
                 <div className="mt-4 w-full px-8">
                     <div className="flex justify-between items-center mb-1 text-[8px] font-black uppercase text-white/40 tracking-widest">
                         <span>{lang === 'AR' ? 'اكتمال الملف' : 'Profile Progress'}</span>
-                        <span className="text-orange-400">{(() => {
-                            let score = 0;
-                            const fields = ['fullName', 'phone', 'location', 'profilePictureUrl', 'cvUrl', 'skills', 'galleryUrls'];
-                            fields.forEach(f => {
-                                const val = (user as any)[f];
-                                if (val && (Array.isArray(val) ? val.length > 0 : val !== '')) score += 1;
-                            });
-                            return Math.round((score / fields.length) * 100);
-                        })()}%</span>
+                        <span className="text-orange-400">{profileCompletionScore}%</span>
                     </div>
                     <div className="w-full bg-white/10 h-1.5 rounded-full overflow-hidden">
-                        <div 
+                        <div
                             className="h-full bg-orange-500 transition-all duration-1000 ease-out"
-                            style={{ width: `${(() => {
-                                let score = 0;
-                                const fields = ['fullName', 'phone', 'location', 'profilePictureUrl', 'cvUrl', 'skills', 'galleryUrls'];
-                                fields.forEach(f => {
-                                    const val = (user as any)[f];
-                                    if (val && (Array.isArray(val) ? val.length > 0 : val !== '')) score += 1;
-                                });
-                                return Math.round((score / fields.length) * 100);
-                            })()}%` }}
+                            style={{ width: `${profileCompletionScore}%` }}
                         />
                     </div>
                 </div>
@@ -121,6 +116,39 @@ export const SideMenu: React.FC<SideMenuProps> = ({
             >
                 <span className="text-xl group-hover:scale-125 transition-transform">💬</span>
                 <span>{lang === 'AR' ? 'المحادثات' : 'Chats'}</span>
+            </button>
+
+            <button 
+                onClick={async () => {
+                   const refUrl = `https://bricola.app/ref/${user.id}`;
+                   const message = lang === 'AR' 
+                     ? `انضم إلي في بريكولا! حمل التطبيق وابحث عن أفضل الحرفيين في تونس: ${refUrl}`
+                     : `Join me on Bricola! Download the app and find the best artisans in Tunisia: ${refUrl}`;
+                   
+                   try {
+                     if (typeof navigator.share === 'function') {
+                        await navigator.share({
+                          title: 'Invite to Bricola',
+                          text: message,
+                          url: refUrl,
+                        });
+                     } else {
+                        await Share.share({
+                          title: 'Invite to Bricola',
+                          text: message,
+                          url: refUrl,
+                          dialogTitle: lang === 'AR' ? 'دعوة صديق' : 'Invite a Friend'
+                        });
+                     }
+                   } catch {
+                      // Share cancelled or failed — no action needed
+                   }
+                   onClose();
+                }}
+                className="w-full p-4 flex items-center gap-4 hover:bg-orange-50 rounded-2xl transition-all text-gray-700 font-bold group"
+            >
+                <span className="text-xl group-hover:scale-125 transition-transform">🤝</span>
+                <span>{lang === 'AR' ? 'دعوة صديق' : 'Invite a Friend'}</span>
             </button>
 
             <div className="pt-4 border-t border-gray-100">

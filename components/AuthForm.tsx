@@ -1,12 +1,13 @@
 ﻿import React, { useState } from 'react';
-import { UserRole, AuthMode, UserProfile } from '../types';
+import { UserRole, AuthMode, UserProfile, translations } from '../types';
 import { auth, db } from '../firebase';
-import { 
-  signInWithEmailAndPassword, 
+import {
+  signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   updateProfile
 } from 'firebase/auth';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, addDoc, collection, serverTimestamp } from 'firebase/firestore';
+import { useLanguage } from '../context/LanguageContext';
 
 interface AuthFormProps {
   role: UserRole;
@@ -15,23 +16,25 @@ interface AuthFormProps {
 }
 
 export const AuthForm: React.FC<AuthFormProps> = ({ role, onSuccess, onBack }) => {
+  const { language } = useLanguage();
+  const t = translations[language] || translations.AR;
   const [mode, setMode] = useState<AuthMode>('LOGIN');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
   const [adminCode, setAdminCode] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [loadingText, setLoadingText] = useState('جاري التحقق...');
+  const [loadingText, setLoadingText] = useState(t.verifying);
   const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
-    setLoadingText('جاري التحقق...');
+    setLoadingText(t.verifying);
     setError(null);
 
     if (mode === 'REGISTER' && role === UserRole.ADMIN && adminCode !== 'BRICOLA-2025') {
-      setError('كود الإدارة غير صحيح. لا يمكن إنشاء حساب مسؤول.');
+      setError(t.adminCodeError);
       setIsLoading(false);
       return;
     }
@@ -39,19 +42,19 @@ export const AuthForm: React.FC<AuthFormProps> = ({ role, onSuccess, onBack }) =
     try {
       if (mode === 'REGISTER') {
         let user;
-        setLoadingText('إنشاء الحساب...');
+        setLoadingText(t.creatingAccount);
         try {
           const userCredential = await createUserWithEmailAndPassword(auth, email, password);
           user = userCredential.user;
         } catch (err: any) {
           if (err.code === 'auth/email-already-in-use') {
-            setLoadingText('التحقق من البيانات...');
+            setLoadingText(t.checkingData);
             const signinCredential = await signInWithEmailAndPassword(auth, email, password);
             user = signinCredential.user;
-            
+
             const existingDoc = await getDoc(doc(db, 'users', `${user.uid}_${role}`));
             if (existingDoc.exists()) {
-              throw new Error('أنت مسجل مسبقاً بهذا الحساب (You already have a profile with this role)');
+              throw new Error(language === 'AR' ? 'أنت مسجل مسبقاً بهذا الحساب' : 'You already have a profile with this role');
             }
           } else {
             throw err;
@@ -60,7 +63,7 @@ export const AuthForm: React.FC<AuthFormProps> = ({ role, onSuccess, onBack }) =
 
         let documentUrl = '';
 
-        setLoadingText('تجهيز الملف الشخصي...');
+        setLoadingText(t.preparingProfile);
         await updateProfile(user, { displayName: fullName });
 
         const userData: UserProfile = {
@@ -71,47 +74,69 @@ export const AuthForm: React.FC<AuthFormProps> = ({ role, onSuccess, onBack }) =
           documentUrl: documentUrl,
           status: role === UserRole.TECHNICIAN ? 'PENDING' : 'APPROVED',
           onboardingCompleted: false,
+          onboardingComplete: false,
           ratingAvg: 0.0,
           ratingCount: 0
         };
 
+        const referredBy = localStorage.getItem('bricola_referred_by');
+        if (referredBy) {
+          userData.referredBy = referredBy;
+          // Only clear after use if it was successfully used
+          localStorage.removeItem('bricola_referred_by');
+        }
+
         if (role === UserRole.TECHNICIAN) {
           userData.isOnline = false;
         }
-        
+
         await setDoc(doc(db, 'users', `${user.uid}_${role}`), userData);
-        setLoadingText('اكتمل التسجيل!');
+
+        // Credit the referrer: write a referral event they can read
+        if (referredBy) {
+          try {
+            await addDoc(collection(db, 'referral_events'), {
+              newUserId: user.uid,
+              newUserName: fullName,
+              referrerId: referredBy,
+              createdAt: serverTimestamp()
+            });
+          } catch {
+            // Non-fatal: referral event write failed, referral still stored on user profile
+          }
+        }
+
+        setLoadingText(t.registrationComplete);
         onSuccess(userData);
       } else {
-        setLoadingText('تسجيل الدخول...');
+        setLoadingText(t.loggingIn);
         const userCredential = await signInWithEmailAndPassword(auth, email, password);
         const user = userCredential.user;
 
-        setLoadingText('جلب البيانات...');
+        setLoadingText(t.fetchingData);
         const userDoc = await getDoc(doc(db, 'users', `${user.uid}_${role}`));
-        
+
         if (userDoc.exists()) {
           onSuccess(userDoc.data() as UserProfile);
         } else {
           const oldDoc = await getDoc(doc(db, 'users', user.uid));
           if (oldDoc.exists() && oldDoc.data()?.role === role) {
              const data = oldDoc.data() as UserProfile;
-             data.id = `${user.uid}_${role}`; 
+             data.id = `${user.uid}_${role}`;
              await setDoc(doc(db, 'users', `${user.uid}_${role}`), data);
              onSuccess(data);
              return;
           }
-          
-          setError(`لا يوجد حساب ${role === UserRole.CLIENT ? 'حريف' : 'فني'} لهذا البريد الإلكتروني. يرجى التسجيل أولاً.`);
+
+          setError(language === 'AR' ? `لا يوجد حساب ${role === UserRole.CLIENT ? 'حريف' : 'فني'} لهذا البريد الإلكتروني. يرجى التسجيل أولاً.` : `No ${role === UserRole.CLIENT ? 'client' : 'technician'} account found for this email. Please register first.`);
           setIsLoading(false);
           return;
         }
       }
     } catch (err: any) {
-      console.error('Registration/Login Error:', err);
-      let msg = err.message || 'حدث خطأ ما، يرجى المحاولة لاحقاً.';
-      if (err.code === 'auth/wrong-password') msg = 'كلمة المرور غير صحيحة.';
-      if (err.code === 'auth/user-not-found') msg = 'الحساب غير موجود.';
+      let msg = err.message || (language === 'AR' ? 'حدث خطأ ما، يرجى المحاولة لاحقاً.' : 'An error occurred. Please try again.');
+      if (err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') msg = language === 'AR' ? 'كلمة المرور غير صحيحة.' : 'Incorrect password.';
+      if (err.code === 'auth/user-not-found') msg = language === 'AR' ? 'الحساب غير موجود.' : 'Account not found.';
       setError(msg);
     } finally {
       setIsLoading(false);

@@ -54,8 +54,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
               setProfile({ ...data, id: docSnap.id } as UserProfile);
             }
             setLoading(false);
-          }, (err) => {
-            console.error("Profile listen error:", err);
+          }, () => {
             setLoading(false);
           });
         } else {
@@ -79,8 +78,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUser(null);
       setProfile(null);
       localStorage.removeItem('bricola_selected_role');
-    } catch (err) {
-      console.error('Logout error:', err);
+    } catch {
+      // Auth sign-out failed — state already cleared locally
     }
   };
 

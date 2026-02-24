@@ -1,6 +1,9 @@
 
 import React, { useState } from 'react';
 import { UserRole } from '../types';
+import { useRemoteConfig } from '../utils/remoteConfigService';
+import { analytics } from '../firebase';
+import { logEvent } from 'firebase/analytics';
 
 interface WelcomeScreenProps {
   onSelectRole: (role: UserRole) => void;
@@ -9,6 +12,16 @@ interface WelcomeScreenProps {
 
 export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onSelectRole, onEnterPrototype }) => {
   const [showProtoOptions, setShowProtoOptions] = useState(false);
+  const { ctaLabelStyle } = useRemoteConfig();
+
+  const clientLabel = ctaLabelStyle === 'find'
+    ? '👤 أنا حريف (أبحث عن فني)'
+    : '👤 أنا حريف (انشر طلبًا)';
+
+  const handleClientClick = () => {
+    analytics.then(a => a && logEvent(a, 'ab_cta_click', { variant: ctaLabelStyle }));
+    onSelectRole(UserRole.CLIENT);
+  };
 
   return (
     <div className="flex flex-col items-center justify-center min-h-[85vh] p-8 text-center relative">
@@ -26,12 +39,12 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({ onSelectRole, onEn
 
       <div className="w-full space-y-4 mb-4">
         <p className="text-sm font-bold text-gray-400 uppercase tracking-widest mb-2">من أنت؟</p>
-        
+
         <button
-          onClick={() => onSelectRole(UserRole.CLIENT)}
+          onClick={handleClientClick}
           className="w-full py-5 bg-white border-2 border-orange-500 text-orange-500 rounded-2xl font-bold text-lg hover:bg-orange-50 transition-all flex items-center justify-center gap-3 shadow-sm active:scale-95"
         >
-          <span>👤 أنا حريف (أبحث عن فني)</span>
+          <span>{clientLabel}</span>
         </button>
 
         <button

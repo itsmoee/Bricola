@@ -1,5 +1,5 @@
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { UserProfile, UserRole, Language, translations, ServiceRequest, ChatMessage } from '../types';
 import { db, storage, remoteConfig, analytics } from '../firebase';
 import { collection, addDoc, query, where, onSnapshot, orderBy, doc, updateDoc, serverTimestamp, getDoc } from 'firebase/firestore';
@@ -9,28 +9,30 @@ import { logEvent } from 'firebase/analytics';
 import { Geolocation } from '@capacitor/geolocation';
 import { MapView } from './MapView';
 import { SideMenu } from './SideMenu';
+import { getTechnicianBadge } from '../utils/badgeUtils';
+import { useRemoteConfig } from '../utils/remoteConfigService';
 
 interface DashboardProps {
   user: UserProfile;
   onLogout: () => void;
   onSettings: () => void;
   onProfile: () => void;
+  onOnboarding: () => void;
   onUpdateProfile: (user: UserProfile) => void;
   onRequestDetails: (req: ServiceRequest) => void;
   lang: Language;
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({ 
-  user, onLogout, onSettings, onProfile, onUpdateProfile, onRequestDetails, lang 
+  user, onLogout, onSettings, onProfile, onOnboarding, onUpdateProfile, onRequestDetails, lang 
 }) => {
   const t = translations[lang] || translations.AR;
 
-  const getCategoryLabel = (category: string) => {
-    // Check if it's one of our ServiceCategory enums
+  const getCategoryLabel = useCallback((category: string) => {
     const catLow = category.toLowerCase();
     if (t[catLow]) return t[catLow];
     return category;
-  };
+  }, [t]);
 
   const [requests, setRequests] = useState<ServiceRequest[]>([]);
   const [activeListTab, setActiveListTab] = useState<'ACTIVE' | 'HISTORY'>('ACTIVE');
@@ -43,6 +45,25 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [clientViewMode, setClientViewMode] = useState<'REQUESTS' | 'BROWSE'>('REQUESTS');
   const [searchQuery, setSearchQuery] = useState('');
   const [technicians, setTechnicians] = useState<UserProfile[]>([]);
+
+  const { browseSortDefault } = useRemoteConfig();
+
+  const sortedTechnicians = useMemo(() => {
+    if (browseSortDefault === 'proximity') {
+      // proximity: online techs first, then alphabetical by name
+      return [...technicians].sort((a, b) => {
+        if (a.isOnline && !b.isOnline) return -1;
+        if (!a.isOnline && b.isOnline) return 1;
+        return (a.fullName || '').localeCompare(b.fullName || '');
+      });
+    }
+    // rating (default): sort by ratingAvg desc, then ratingCount desc
+    return [...technicians].sort((a, b) => {
+      const ratingDiff = (b.ratingAvg || 0) - (a.ratingAvg || 0);
+      if (ratingDiff !== 0) return ratingDiff;
+      return (b.ratingCount || 0) - (a.ratingCount || 0);
+    });
+  }, [technicians, browseSortDefault]);
   const [selectedTech, setSelectedTech] = useState<UserProfile | null>(null);
   const [showMap, setShowMap] = useState(false);
   const [isOnlineStatus, setIsOnlineStatus] = useState(navigator.onLine);
@@ -75,8 +96,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
   // Chat states
   const [openChatId, setOpenChatId] = useState<string | null>(null);
   const [showActiveChats, setShowActiveChats] = useState(false);
+  const [chatOtherUser, setChatOtherUser] = useState<UserProfile | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [newMessageText, setNewMessageText] = useState('');
+  const [isSendingMessage, setIsSendingMessage] = useState(false);
+  const [sendMessageError, setSendMessageError] = useState<string | null>(null);
   const chatScrollRef = useRef<HTMLDivElement>(null);
 
   const [isUploading, setIsUploading] = useState(false);
@@ -96,17 +120,28 @@ export const Dashboard: React.FC<DashboardProps> = ({
       const userRef = doc(db, 'users', user.id);
       await updateDoc(userRef, { [field]: url });
       onUpdateProfile({ ...user, [field]: url });
-      alert(lang === 'AR' ? 'تم الرفع بنجاح!' : 'Uploaded successfully!');
-    } catch (err) {
-      console.error(err);
-      alert('Upload failed');
+      alert(t.uploadSuccess);
+    } catch {
+      alert(lang === 'AR' ? 'فشل الرفع. يرجى المحاولة مجدداً.' : 'Upload failed. Please try again.');
     } finally {
       setIsUploading(false);
     }
   };
 
   useEffect(() => {
-    if (!openChatId) return;
+    if (!openChatId) {
+      setChatOtherUser(null);
+      return;
+    }
+
+    const currentReq = requests.find(r => r.id === openChatId);
+    if (currentReq?.assignedTechId) {
+      // Always fetch the tech's info for the badge, regardless of current role
+      getDoc(doc(db, 'users', currentReq.assignedTechId)).then(snap => {
+        if (snap.exists()) setChatOtherUser(snap.data() as UserProfile);
+      });
+    }
+
     const q = query(collection(db, 'requests', openChatId, 'messages'), orderBy('timestamp', 'asc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const msgs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as ChatMessage));
@@ -114,7 +149,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
       setTimeout(() => chatScrollRef.current?.scrollTo(0, chatScrollRef.current.scrollHeight), 100);
     });
     return () => unsubscribe();
-  }, [openChatId]);
+  }, [openChatId, requests]);
 
   const handleSubmitRating = async (requestId: string, ratingValue: number) => {
     try {
@@ -148,8 +183,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
         // Mock update
         setRequests(prev => prev.map(r => r.id === requestId ? { ...r, rating: ratingValue } : r));
       }
-    } catch (error) {
-      console.error('Error rating:', error);
+    } catch {
+      // Rating save failed — non-critical, user can retry
     } finally {
       setRatingLoading(null);
     }
@@ -171,9 +206,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
         isOnline: newStatus
       });
       onUpdateProfile({ ...user, isOnline: newStatus });
-    } catch (err) {
-      console.error('Error toggling online status:', err);
-      alert('Failed to update status');
+    } catch {
+      alert(lang === 'AR' ? 'تعذر تحديث حالة الاتصال.' : 'Failed to update status.');
     } finally {
       setIsUpdatingStatus(false);
     }
@@ -184,9 +218,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
     try {
       const requestRef = doc(db, 'requests', requestId);
       await updateDoc(requestRef, { status: newStatus });
-    } catch (err) {
-      console.error('Error updating job status:', err);
-      alert('Failed to update job');
+    } catch {
+      alert(lang === 'AR' ? 'تعذر تحديث حالة المهمة.' : 'Failed to update job status.');
     }
   };
 
@@ -199,8 +232,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
       try {
         await fetchAndActivate(remoteConfig);
         setPromoEnabled(getBoolean(remoteConfig, 'ramadan_promo_enabled'));
-      } catch (e) {
-        console.warn('Remote Config sync failed');
+      } catch {
+        // Remote Config fetch failed — default values remain in effect
       }
     };
     syncRemoteConfig();
@@ -370,30 +403,36 @@ export const Dashboard: React.FC<DashboardProps> = ({
         }
         setRequests(fetchedRequests);
       }, (e) => {
-        console.error('Dashboard fetch error:', e);
         setError(e.message);
       });
 
       return () => unsubscribe();
     } catch (err: any) {
-      console.error('Dashboard hook error:', err);
+      setError(err.message || 'Failed to load data');
     }
   }, [user.id, user.role, currentOnlineStatus]);
 
-  const urgencyOrder = { 'HIGH': 3, 'MEDIUM': 2, 'LOW': 1, undefined: 0 };
-  const sortedRequests = [...requests].sort((a, b) => {
+  const urgencyOrder = useMemo(() => ({ 'HIGH': 3, 'MEDIUM': 2, 'LOW': 1, undefined: 0 }), []);
+
+  const sortedRequests = useMemo(() => [...requests].sort((a, b) => {
     const urgencyA = urgencyOrder[a.urgency || 'LOW'];
     const urgencyB = urgencyOrder[b.urgency || 'LOW'];
     if (urgencyB !== urgencyA) return urgencyB - urgencyA;
     return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-  });
+  }), [requests, urgencyOrder]);
 
-  const activeJobs = sortedRequests.filter(r => 
-    r.status !== 'COMPLETED' && 
+  const activeJobs = useMemo(() => sortedRequests.filter(r =>
+    (r.status !== 'COMPLETED' || r.paymentConfirmed === false) &&
     (user.role === UserRole.CLIENT || currentOnlineStatus || r.assignedTechId === user.id)
-  );
-  const historyJobs = sortedRequests.filter(r => r.status === 'COMPLETED');
-  const displayList = activeListTab === 'ACTIVE' ? activeJobs : historyJobs;
+  ), [sortedRequests, user.role, user.id, currentOnlineStatus]);
+
+  const historyJobs = useMemo(() =>
+    sortedRequests.filter(r => r.status === 'COMPLETED' && r.paymentConfirmed !== false),
+  [sortedRequests]);
+
+  const displayList = useMemo(() =>
+    activeListTab === 'ACTIVE' ? activeJobs : historyJobs,
+  [activeListTab, activeJobs, historyJobs]);
 
   const initiateCreateRequest = async (serviceType: string) => {
     setRequestDetails({
@@ -415,8 +454,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
         ...prev,
         location: lang === 'AR' ? `موقعي الحالي (Lat: ${lat}, Lng: ${lng})` : `My Location (Lat: ${lat}, Lng: ${lng})`
       }));
-    } catch (e) {
-      console.warn('Geolocation failed on form open', e);
+    } catch {
+      // Geolocation unavailable — user can type location manually
     }
   };
 
@@ -471,8 +510,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
       try {
         const position = await Geolocation.getCurrentPosition({ enableHighAccuracy: true });
         coords = { lat: position.coords.latitude, lng: position.coords.longitude };
-      } catch (e) {
-        console.warn('Geolocation failed, continuing without coords');
+      } catch {
+        // Geolocation unavailable — continue without coordinates
       }
       
       const newRequest = {
@@ -503,9 +542,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
          preferredTime: '',
          photos: []
       });
-    } catch (err) {
-      console.error(err);
-      alert('Error creating request');
+    } catch {
+      alert(lang === 'AR' ? 'حدث خطأ أثناء إرسال الطلب.' : 'Error creating request. Please try again.');
     } finally {
       if (user.id !== 'mock_guest') setIsSubmitting(false);
     }
@@ -513,6 +551,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   const handleSendMessage = async () => {
     if (!openChatId || !newMessageText.trim()) return;
+    setIsSendingMessage(true);
+    setSendMessageError(null);
     try {
       const msgData = {
         senderId: user.id,
@@ -522,8 +562,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
       };
       await addDoc(collection(db, 'requests', openChatId, 'messages'), msgData);
       setNewMessageText('');
-    } catch (err) {
-      console.error(err);
+    } catch {
+      setSendMessageError(t.errorSendingMessage);
+    } finally {
+      setIsSendingMessage(false);
     }
   };
 
@@ -586,9 +628,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
         setOpenChatId(docRef.id);
       }
       setSelectedTech(null);
-    } catch (err) {
-      console.error(err);
-      alert('Failed to start chat');
+    } catch {
+      alert(t.errorStartingChat);
     }
   };
 
@@ -622,9 +663,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
        setShowQuoteInput(null);
        setEstimatedQuote('');
        alert(lang === 'AR' ? 'تم تقديم عرض السعر! بانتظار موافقة الحريف.' : 'Quote proposed! Waiting for client approval.');
-    } catch (err) {
-      console.error(err);
-      alert('Error accepting job');
+    } catch {
+      alert(lang === 'AR' ? 'حدث خطأ أثناء قبول المهمة.' : 'Error accepting job. Please try again.');
     }
   };
 
@@ -640,8 +680,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
         status: 'COMPLETED'
       });
       alert(lang === 'AR' ? 'تم إكمال المهمة بنجاح!' : 'Job completed successfully!');
-    } catch (err) {
-      console.error(err);
+    } catch {
+      alert(lang === 'AR' ? t.errorCompletingJob : t.errorCompletingJob);
     }
   };
   
@@ -659,6 +699,23 @@ export const Dashboard: React.FC<DashboardProps> = ({
         onLogout={onLogout} 
         onOpenChat={() => setShowActiveChats(true)}
       />
+
+      {user.onboardingComplete !== true && (
+        <div className="mb-6 p-4 bg-orange-50 border-2 border-orange-100 rounded-3xl flex items-center justify-between gap-4 shadow-sm animate-fade-in">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-orange-100 rounded-2xl flex items-center justify-center text-xl shrink-0">⚠️</div>
+            <p className="text-xs font-bold text-orange-900 leading-tight">
+              {translations[lang]?.incompleteProfile || 'Your profile is incomplete — complete it to start receiving jobs'}
+            </p>
+          </div>
+          <button 
+            onClick={onOnboarding}
+            className="whitespace-nowrap bg-orange-600 text-white px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-wider shadow-md active:scale-95 transition-all"
+          >
+            {translations[lang]?.finishSetup || 'Finish Setup'}
+          </button>
+        </div>
+      )}
 
       {isSubmitting && (
         <div className="absolute inset-0 bg-white/50 backdrop-blur-sm z-[60] flex items-center justify-center">
@@ -817,7 +874,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                               photos: [...prev.photos, reader.result as string]
                             }));
                           };
-                          reader.readAsDataURL(file);
+                          reader.readAsDataURL(file as File);
                         });
                       }}
                     />
@@ -1046,9 +1103,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
               </div>
 
               <div className="grid grid-cols-1 gap-4 pb-10">
-                {technicians
-                  .filter(tech => 
-                    tech.fullName.toLowerCase().includes(searchQuery.toLowerCase()) || 
+                {sortedTechnicians
+                  .filter(tech =>
+                    tech.fullName.toLowerCase().includes(searchQuery.toLowerCase()) ||
                     (tech.skills?.join(' ') || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
                     (tech.specializations?.join(' ') || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
                     tech.id.toLowerCase().includes(searchQuery.toLowerCase())
@@ -1057,9 +1114,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       <p className="font-bold">{lang === 'AR' ? 'لم يتم العثور على فنيين يطابقون بحثك.' : 'No technicians found matching your search.'}</p>
                     </div>
                   ) : (
-                    technicians
-                    .filter(tech => 
-                      tech.fullName.toLowerCase().includes(searchQuery.toLowerCase()) || 
+                    sortedTechnicians
+                    .filter(tech =>
+                      tech.fullName.toLowerCase().includes(searchQuery.toLowerCase()) ||
                       (tech.skills?.join(' ') || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
                       (tech.specializations?.join(' ') || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
                       tech.id.toLowerCase().includes(searchQuery.toLowerCase())
@@ -1078,6 +1135,19 @@ export const Dashboard: React.FC<DashboardProps> = ({
                           <div className="flex-1">
                              <h4 className="font-bold text-gray-800 text-lg">{tech.fullName}</h4>
                              <p className="text-[10px] text-gray-400 font-bold mb-1 uppercase tracking-widest">📍 {tech.location || 'غير محدد'}</p>
+                             
+                             {tech.availabilityStatus && (
+                                <div className={`inline-flex items-center px-2 py-0.5 rounded-full text-[8px] font-black uppercase tracking-wider mb-2 ${
+                                  tech.availabilityStatus === 'AVAILABLE' ? 'bg-green-100 text-green-700' :
+                                  tech.availabilityStatus === 'BUSY' ? 'bg-red-100 text-red-700' :
+                                  'bg-gray-100 text-gray-500 border border-gray-200'
+                                }`}>
+                                  {tech.availabilityStatus === 'AVAILABLE' ? t.availableToday :
+                                   tech.availabilityStatus === 'BUSY' ? t.busyThisWeek :
+                                   t.onVacation}
+                                </div>
+                             )}
+
                              <div className="flex gap-1 flex-wrap">
                                {(tech.skills || []).slice(0, 3).map(s => (
                                  <span key={s} className="px-2 py-0.5 bg-orange-50 text-orange-500 text-[8px] font-black rounded-lg">{s}</span>
@@ -1092,9 +1162,23 @@ export const Dashboard: React.FC<DashboardProps> = ({
                           </button>
                         </div>
                         {tech.ratingAvg !== undefined && (
-                           <div className="mt-2 flex items-center gap-1">
-                              <span className="text-xs font-black text-orange-500">⭐ {(tech.ratingAvg || 0).toFixed(1)}</span>
-                              <span className="text-[10px] text-gray-400">({tech.ratingCount || 0})</span>
+                           <div className="mt-2 flex items-center justify-between">
+                              <div className="flex items-center gap-1">
+                                <span className="text-xs font-black text-orange-500">⭐ {(tech.ratingAvg || 0).toFixed(1)}</span>
+                                <span className="text-[10px] text-gray-400">({tech.ratingCount || 0})</span>
+                              </div>
+                              <div className={`flex items-center gap-1 px-2 py-0.5 rounded-lg ${getTechnicianBadge(tech).bgColor} border border-opacity-30`}>
+                                <span className="text-[10px]">
+                                  {getTechnicianBadge(tech).tier === 'PRO_VERIFIED' ? '🏆' : 
+                                   getTechnicianBadge(tech).tier === 'TRUSTED' ? '🛡️' : '✨'}
+                                </span>
+                                <span 
+                                  className="text-[8px] font-black uppercase tracking-wider" 
+                                  style={{ color: getTechnicianBadge(tech).color }}
+                                >
+                                  {lang === 'AR' ? getTechnicianBadge(tech).label.AR : getTechnicianBadge(tech).label.EN}
+                                </span>
+                              </div>
                            </div>
                         )}
                       </div>
@@ -1301,34 +1385,83 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     </div>
                   )}
 
-                  {activeListTab === 'HISTORY' && !req.rating && (
-                    <div className="mt-4 pt-3 border-t border-gray-50">
-                      <p className="text-[10px] font-bold text-gray-400 mb-2 uppercase tracking-tight">
-                        {t.rateService}
-                      </p>
-                      <div className="flex gap-2">
-                        {[1, 2, 3, 4, 5].map((star) => (
-                          <button
-                            key={star}
-                            disabled={ratingLoading === req.id}
-                            onClick={() => handleSubmitRating(req.id, star)}
-                            className="text-2xl hover:scale-125 transition-transform active:scale-95"
+                  {activeListTab === 'ACTIVE' && req.status === 'COMPLETED' && (
+                    <div className="mt-3">
+                       {user.role === UserRole.CLIENT ? (
+                          <button 
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onRequestDetails(req);
+                            }}
+                            className="w-full py-4 bg-blue-600 text-white rounded-xl text-xs font-black uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-blue-700 transition-all shadow-lg active:scale-95"
                           >
-                            ☆
+                            🏁 {lang === 'AR' ? 'تأكيد العمل وتحرير التقييم' : 'Confirm Work & Release Rating'}
                           </button>
-                        ))}
-                      </div>
+                       ) : (
+                          <div className="p-3 bg-slate-100 rounded-xl text-slate-500 text-[10px] font-black uppercase text-center italic tracking-widest">
+                             ⏳ {lang === 'AR' ? 'بانتظار تأكيد الحريف' : 'Waiting for client confirmation'}
+                          </div>
+                       )}
                     </div>
                   )}
 
-                  {activeListTab === 'HISTORY' && req.rating && (
-                    <div className="mt-3 pt-2 border-t border-gray-50 flex items-center gap-1">
-                      <span className="text-[10px] font-bold text-gray-500 uppercase">{lang === 'AR' ? 'تقييمك:' : 'Your rating:'}</span>
-                      <div className="flex">
-                        {[1, 2, 3, 4, 5].map((s) => (
-                          <span key={s} className="text-sm">{s <= req.rating ? '⭐' : ''}</span>
-                        ))}
-                      </div>
+                  {activeListTab === 'HISTORY' && (
+                    <div className="mt-4 pt-3 border-t border-gray-50">
+                      {user.role === UserRole.CLIENT && !req.rating && req.paymentConfirmed === false && (
+                         <button 
+                            onClick={(e) => {
+                               e.stopPropagation();
+                               onRequestDetails(req);
+                            }}
+                            className="w-full py-3 bg-blue-600 text-white rounded-xl text-xs font-extra-bold flex items-center justify-center gap-2 hover:bg-blue-700 transition-colors mb-3"
+                          >
+                             🏁 {lang === 'AR' ? 'تأكيد العمل والدفع' : 'Confirm Work & Payment'}
+                          </button>
+                      )}
+
+                      {!req.rating && (
+                        <>
+                          {req.paymentConfirmed === false ? (
+                             <div className="bg-blue-50/50 p-3 rounded-xl border border-blue-100/50 mb-2">
+                               <p className="text-[10px] font-black text-blue-600 uppercase tracking-tighter leading-tight italic">
+                                 ⚠️ {lang === 'AR' 
+                                   ? 'يرجى تأكيد إنجاز المهمة والدفع قبل التقييم.' 
+                                   : 'Please confirm the work is done before leaving a review.'}
+                               </p>
+                             </div>
+                          ) : (
+                            <p className="text-[10px] font-bold text-gray-400 mb-2 uppercase tracking-tight">
+                              {t.rateService}
+                            </p>
+                          )}
+                          <div className="flex gap-2">
+                            {[1, 2, 3, 4, 5].map((star) => (
+                              <button
+                                key={star}
+                                disabled={ratingLoading === req.id || req.paymentConfirmed === false}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleSubmitRating(req.id, star);
+                                }}
+                                className={`text-2xl transition-transform active:scale-95 ${req.paymentConfirmed === false ? 'opacity-20 grayscale cursor-not-allowed' : 'hover:scale-125'}`}
+                              >
+                                ☆
+                              </button>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                      
+                      {req.rating && (
+                        <div className="mt-3 pt-2 border-t border-gray-50 flex items-center gap-1">
+                          <span className="text-[10px] font-bold text-gray-500 uppercase">{lang === 'AR' ? 'تقييمك:' : 'Your rating:'}</span>
+                          <div className="flex">
+                            {[1, 2, 3, 4, 5].map((s) => (
+                              <span key={s} className="text-sm">{s <= req.rating ? '⭐' : ''}</span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
@@ -1663,7 +1796,21 @@ export const Dashboard: React.FC<DashboardProps> = ({
               </button>
               <div className="text-center">
                 <h3 className="font-bold text-gray-800">{lang === 'AR' ? 'المحادثة المباشرة' : 'Live Chat'}</h3>
-                <p className="text-[10px] text-green-500 font-black tracking-widest uppercase">● Online</p>
+                {chatOtherUser && chatOtherUser.role === UserRole.TECHNICIAN && (
+                  <div className={`mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full ${getTechnicianBadge(chatOtherUser).bgColor} border border-opacity-30`}>
+                    <span className="text-[10px]">
+                      {getTechnicianBadge(chatOtherUser).tier === 'PRO_VERIFIED' ? '🏆' : 
+                       getTechnicianBadge(chatOtherUser).tier === 'TRUSTED' ? '🛡️' : '✨'}
+                    </span>
+                    <span 
+                      className="text-[8px] font-black uppercase tracking-wider" 
+                      style={{ color: getTechnicianBadge(chatOtherUser).color }}
+                    >
+                      {lang === 'AR' ? getTechnicianBadge(chatOtherUser).label.AR : getTechnicianBadge(chatOtherUser).label.EN}
+                    </span>
+                  </div>
+                )}
+                <p className="mt-1 text-[8px] text-green-500 font-black tracking-widest uppercase">● Online</p>
               </div>
               <div className="w-10" />
             </header>
@@ -1696,20 +1843,24 @@ export const Dashboard: React.FC<DashboardProps> = ({
             </div>
 
             <footer className="p-4 bg-white border-t border-gray-100 pb-10">
+              {sendMessageError && (
+                <p className="text-xs text-red-500 font-medium mb-2 px-1">{sendMessageError}</p>
+              )}
               <div className="flex gap-2">
-                <input 
+                <input
                   type="text"
                   value={newMessageText}
                   onChange={(e) => setNewMessageText(e.target.value)}
-                  onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+                  onKeyPress={(e) => e.key === 'Enter' && !isSendingMessage && handleSendMessage()}
                   placeholder={lang === 'AR' ? 'اكتب رسالتك...' : 'Type message...'}
                   className="flex-1 bg-gray-50 border-none rounded-2xl p-4 text-sm focus:ring-2 focus:ring-blue-400 outline-none"
                 />
-                <button 
+                <button
                   onClick={handleSendMessage}
-                  className="w-12 h-12 bg-blue-600 text-white rounded-2xl flex items-center justify-center shadow-lg shadow-blue-100"
+                  disabled={isSendingMessage || !newMessageText.trim()}
+                  className="w-12 h-12 bg-blue-600 text-white rounded-2xl flex items-center justify-center shadow-lg shadow-blue-100 disabled:opacity-50"
                 >
-                  ➤
+                  {isSendingMessage ? '...' : '➤'}
                 </button>
               </div>
             </footer>
@@ -1739,12 +1890,37 @@ export const Dashboard: React.FC<DashboardProps> = ({
                  </div>
                  <div>
                     <h2 className="text-3xl font-black text-gray-800">{selectedTech.fullName}</h2>
-                    <p className="text-gray-400 font-bold uppercase tracking-[0.2em] text-[10px] mt-1">📍 {selectedTech.location || 'Tunisia'}</p>
+                    <div className="flex flex-col items-center gap-1 mt-1">
+                      <p className="text-gray-400 font-bold uppercase tracking-[0.2em] text-[10px]">📍 {selectedTech.location || 'Tunisia'}</p>
+                      <div className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full ${getTechnicianBadge(selectedTech).bgColor} border border-opacity-30`}>
+                        <span className="text-xs">
+                          {getTechnicianBadge(selectedTech).tier === 'PRO_VERIFIED' ? '🏆' : 
+                          getTechnicianBadge(selectedTech).tier === 'TRUSTED' ? '🛡️' : '✨'}
+                        </span>
+                        <span 
+                          className="text-[10px] font-black uppercase tracking-wider" 
+                          style={{ color: getTechnicianBadge(selectedTech).color }}
+                        >
+                          {lang === 'AR' ? getTechnicianBadge(selectedTech).label.AR : getTechnicianBadge(selectedTech).label.EN}
+                        </span>
+                      </div>
+                    </div>
                     {selectedTech.isOnline && (
                       <div className="mt-2 inline-flex items-center gap-2 px-3 py-1 bg-green-50 text-green-600 rounded-full text-[10px] font-black uppercase">
                         <span className="w-2 h-2 bg-green-500 rounded-full" />
                         {lang === 'AR' ? 'متصل الآن' : 'Online'}
                       </div>
+                    )}
+                    {selectedTech.availabilityStatus && (
+                       <div className={`mt-2 inline-flex items-center gap-2 px-3 py-1 rounded-full text-[10px] font-black uppercase ${
+                         selectedTech.availabilityStatus === 'AVAILABLE' ? 'bg-green-50 text-green-600' :
+                         selectedTech.availabilityStatus === 'BUSY' ? 'bg-red-50 text-red-600' :
+                         'bg-gray-100 text-gray-500 border border-gray-200'
+                       }`}>
+                         {selectedTech.availabilityStatus === 'AVAILABLE' ? t.availableToday :
+                          selectedTech.availabilityStatus === 'BUSY' ? t.busyThisWeek :
+                          t.onVacation}
+                       </div>
                     )}
                  </div>
               </div>

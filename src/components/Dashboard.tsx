@@ -28,8 +28,10 @@ import {
   updateDoc,
   where
 } from 'firebase/firestore';
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { logEvent } from 'firebase/analytics';
 import { fetchAndActivate, getBoolean } from 'firebase/remote-config';
-import { analytics, db, remoteConfig } from '../firebase';
+import { analytics, db, storage, remoteConfig } from '../firebase';
 import {
   ChatMessage,
   Language,
@@ -118,7 +120,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [chatOtherUser, setChatOtherUser] = useState<UserProfile | null>(null);
   const [newMessageText, setNewMessageText] = useState('');
   const [isSendingMessage, setIsSendingMessage] = useState(false);
+  const [sendMessageError, setSendMessageError] = useState<string | null>(null);
+  const chatScrollRef = useRef<ScrollView>(null);
 
+  const [isUploading, setIsUploading] = useState(false);
   const [quoteModalRequestId, setQuoteModalRequestId] = useState<string | null>(null);
   const [estimatedQuote, setEstimatedQuote] = useState('');
   const [counterRequestId, setCounterRequestId] = useState<string | null>(null);
@@ -126,6 +131,31 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   const [promoEnabled, setPromoEnabled] = useState(false);
   const initialLoadRef = useRef(true);
+
+  const handleProfileUpdate = async (field: keyof UserProfile, uri: string) => {
+    if (user.id === 'mock_guest') {
+      Alert.alert('Mock mode', 'File upload simulated');
+      onUpdateProfile({ ...user, [field]: uri });
+      return;
+    }
+    setIsUploading(true);
+    try {
+      const response = await fetch(uri);
+      const blob = await response.blob();
+      const storageRef = ref(storage, `tech_docs/${user.id}/${String(field)}_${Date.now()}`);
+      await uploadBytes(storageRef, blob);
+      const url = await getDownloadURL(storageRef);
+
+      const userRef = doc(db, 'users', user.id);
+      await updateDoc(userRef, { [field]: url });
+      onUpdateProfile({ ...user, [field]: url });
+      Alert.alert('', t.uploadSuccess);
+    } catch {
+      Alert.alert('', lang === 'AR' ? 'فشل الرفع. يرجى المحاولة مجدداً.' : 'Upload failed. Please try again.');
+    } finally {
+      setIsUploading(false);
+    }
+  };
 
   const getCategoryLabel = useCallback(
     (category: string) => {
@@ -321,6 +351,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     const unsubscribe = onSnapshot(qMsg, snap => {
       const msgs = snap.docs.map(s => ({ id: s.id, ...(s.data() as Omit<ChatMessage, 'id'>), timestamp: toIsoDate((s.data() as any).timestamp) }));
       setChatMessages(msgs);
+      setTimeout(() => chatScrollRef.current?.scrollToEnd({ animated: true }), 100);
     });
     return () => unsubscribe();
   }, [openChatId, requests, user.role]);
@@ -448,7 +479,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     }
 
     setIsSubmitting(true);
-    void analytics;
+    analytics.then(a => a && logEvent(a, 'create_request_start', { service: requestDetails.serviceType }));
 
     try {
       if (user.id === 'mock_guest') {
@@ -501,6 +532,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         preferredTime: '',
         photos: []
       });
+      analytics.then(a => a && logEvent(a, 'create_request_success', { service: requestDetails.serviceType }));
       Alert.alert(isArabic ? 'تم' : 'Success', isArabic ? 'تم إرسال الطلب بنجاح' : 'Request sent successfully');
     } catch {
       Alert.alert(isArabic ? 'خطأ' : 'Error', isArabic ? 'تعذر إنشاء الطلب' : 'Failed to create request');
@@ -514,6 +546,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
       return;
     }
     setIsSendingMessage(true);
+    setSendMessageError(null);
     try {
       await addDoc(collection(db, 'requests', openChatId, 'messages'), {
         senderId: user.id,
@@ -523,7 +556,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
       });
       setNewMessageText('');
     } catch {
-      Alert.alert(t.errorSendingMessage);
+      setSendMessageError(t.errorSendingMessage);
     } finally {
       setIsSendingMessage(false);
     }
@@ -605,6 +638,21 @@ export const Dashboard: React.FC<DashboardProps> = ({
       } else {
         await updateDoc(doc(db, 'requests', requestId), { status });
       }
+    } catch {
+      Alert.alert(t.errorCompletingJob);
+    }
+  };
+
+  const handleCompleteJob = async (requestId: string) => {
+    if (user.id === 'mock_guest') {
+      setRequests(prev => prev.map(r => (r.id === requestId ? { ...r, status: 'COMPLETED' } : r)));
+      Alert.alert('', isArabic ? 'تم إكمال المهمة بنجاح!' : 'Job completed successfully!');
+      return;
+    }
+    try {
+      const requestRef = doc(db, 'requests', requestId);
+      await updateDoc(requestRef, { status: 'COMPLETED' });
+      Alert.alert('', isArabic ? 'تم إكمال المهمة بنجاح!' : 'Job completed successfully!');
     } catch {
       Alert.alert(t.errorCompletingJob);
     }
@@ -1106,7 +1154,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
               <View style={{ width: 40 }} />
             </View>
 
-            <ScrollView contentContainerStyle={styles.chatMessagesWrap}>
+            <ScrollView ref={chatScrollRef} contentContainerStyle={styles.chatMessagesWrap}>
               {chatMessages.length === 0 ? (
                 <Text style={styles.emptyText}>{isArabic ? 'ابدأ المحادثة الآن' : 'Start chatting now'}</Text>
               ) : (
@@ -1119,6 +1167,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
               )}
             </ScrollView>
 
+            {sendMessageError ? (
+              <Text style={styles.sendErrorText}>{sendMessageError}</Text>
+            ) : null}
+
             <View style={styles.chatInputRow}>
               <TextInput
                 value={newMessageText}
@@ -1126,6 +1178,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 style={styles.chatInput}
                 placeholder={isArabic ? 'اكتب رسالة...' : 'Type message...'}
                 textAlign={isArabic ? 'right' : 'left'}
+                onSubmitEditing={() => void handleSendMessage()}
+                returnKeyType="send"
               />
               <Pressable style={styles.chatSend} onPress={() => void handleSendMessage()} disabled={isSendingMessage || !newMessageText.trim()}>
                 <Text style={styles.chatSendText}>{isSendingMessage ? '...' : '➤'}</Text>
@@ -1614,6 +1668,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center'
   },
   chatSendText: { color: '#FFFFFF', fontWeight: '900' },
+  sendErrorText: { color: '#DC2626', fontSize: 12, fontWeight: '600', paddingHorizontal: 12, marginBottom: 4 },
   simpleModal: {
     marginHorizontal: 16,
     marginBottom: 20,

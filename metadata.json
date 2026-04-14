@@ -1,9 +1,0 @@
-
-{
-  "name": "Bricola",
-  "description": "تطبيق يربط بين المواطنين والفنيين في تونس (سباك، كهربائي، إلخ)",
-  "requestFramePermissions": [
-    "camera",
-    "geolocation"
-  ]
-}

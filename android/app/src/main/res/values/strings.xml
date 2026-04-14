@@ -1,7 +1,3 @@
-<?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">Bricola</string>
-    <string name="title_activity_main">Bricola</string>
-    <string name="package_name">bricola.app</string>
-    <string name="custom_url_scheme">bricola.app</string>
+    <string name="app_name">MyApp</string>
 </resources>

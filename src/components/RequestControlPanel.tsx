@@ -11,7 +11,8 @@ import {
   View
 } from 'react-native';
 import { doc, getDoc, serverTimestamp, updateDoc } from 'firebase/firestore';
-import { db } from '../firebase';
+import { logEvent } from 'firebase/analytics';
+import { db, analytics } from '../firebase';
 import { Language, ServiceRequest, UserProfile, UserRole, translations } from '../types';
 
 interface RequestControlPanelProps {
@@ -35,6 +36,7 @@ export const RequestControlPanel: React.FC<RequestControlPanelProps> = ({
   const t = translations[lang] || translations.AR;
   const [isUpdating, setIsUpdating] = useState(false);
   const [offerPrice, setOfferPrice] = useState(request.quote || '');
+  const [offerMessage, setOfferMessage] = useState('');
   const [showOfferForm, setShowOfferForm] = useState(false);
   const [showCounterForm, setShowCounterForm] = useState(false);
   const [counterPrice, setCounterPrice] = useState('');
@@ -217,12 +219,35 @@ export const RequestControlPanel: React.FC<RequestControlPanelProps> = ({
       }
 
       onStatusUpdate({ ...request, ...reqUpdate });
+      analytics.then(a => a && logEvent(a, 'rate_technician', { rating: selectedRating }));
       setRatingSubmitted(true);
     } catch {
       setActionError(lang === 'AR' ? 'تعذر حفظ التقييم. حاول مجدداً.' : 'Failed to save rating. Please try again.');
     } finally {
       setIsUpdating(false);
     }
+  };
+
+  const generateInvoice = () => {
+    const timestamp = Date.now();
+    const invoiceNo = `${request.id.slice(-6).toUpperCase()}-${timestamp.toString().slice(-4)}`;
+    const dateStr = new Date(timestamp).toLocaleDateString();
+    const invoiceText =
+      lang === 'AR'
+        ? `فاتورة بريكولا\nرقم: ${invoiceNo}\nتاريخ: ${dateStr}\n\nالخدمة: ${request.serviceType}\nالفني: ${request.assignedTechName || 'N/A'}\nالحريف: ${request.clientName || 'N/A'}\n\nالمبلغ: ${request.quote || request.budget || '0'} د.ت\n\nشكراً لاستخدامكم بريكولا!`
+        : `BRICOLA INVOICE\nNo: ${invoiceNo}\nDate: ${dateStr}\n\nService: ${request.serviceType}\nTechnician: ${request.assignedTechName || 'N/A'}\nClient: ${request.clientName || 'N/A'}\n\nTOTAL: ${request.quote || request.budget || '0'} TND\n\nThank you for using Bricola!`;
+
+    Alert.alert(
+      lang === 'AR' ? 'فاتورة' : 'Invoice',
+      invoiceText,
+      [
+        {
+          text: lang === 'AR' ? 'مشاركة عبر واتساب' : 'Share via WhatsApp',
+          onPress: () => void shareOnWhatsApp()
+        },
+        { text: lang === 'AR' ? 'حسنا' : 'OK' }
+      ]
+    );
   };
 
   const shareOnWhatsApp = async () => {
@@ -259,6 +284,13 @@ export const RequestControlPanel: React.FC<RequestControlPanelProps> = ({
               onChangeText={setOfferPrice}
               keyboardType="numeric"
               placeholder={lang === 'AR' ? 'السعر المقترح' : 'Proposed price'}
+            />
+            <TextInput
+              style={[styles.modalInput, { minHeight: 60, textAlignVertical: 'top' }]}
+              value={offerMessage}
+              onChangeText={setOfferMessage}
+              placeholder={lang === 'AR' ? 'رسالة إضافية (اختياري)' : 'Additional message (optional)'}
+              multiline
             />
             <View style={styles.modalActions}>
               <Pressable style={styles.modalGhost} onPress={() => setShowOfferForm(false)}>
@@ -326,12 +358,7 @@ export const RequestControlPanel: React.FC<RequestControlPanelProps> = ({
             </Pressable>
             <Pressable
               style={styles.chatBtn}
-              onPress={() => {
-                Alert.alert(
-                  'Invoice',
-                  '⚠️ MANUAL REVIEW NEEDED: PDF invoice generation from jsPDF should be replaced with a native PDF/export flow.'
-                );
-              }}
+              onPress={generateInvoice}
             >
               <Text style={styles.chatBtnText}>{lang === 'AR' ? 'تحميل فاتورة' : 'Download Invoice'}</Text>
             </Pressable>
